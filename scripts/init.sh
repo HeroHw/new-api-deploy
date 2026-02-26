@@ -47,7 +47,6 @@ CONTAINER_GREEN=${CONTAINER_GREEN:-app-green}
 CONTAINER_HAPROXY=${CONTAINER_HAPROXY:-haproxy}
 NETWORK_NAME=${NETWORK_NAME:-deploy-network}
 HAPROXY_HTTP_PORT=${HAPROXY_HTTP_PORT:-80}
-HAPROXY_STATS_PORT=${HAPROXY_STATS_PORT:-8404}
 
 # 验证必要的镜像配置
 if [[ -z "$ACR_REGISTRY" || "$ACR_REGISTRY" == "your-registry.azurecr.io" ]]; then
@@ -97,4 +96,3 @@ sleep 10
 
 log_info "初始化完成!"
 log_info "应用访问地址: http://localhost:${HAPROXY_HTTP_PORT}"
-log_info "HAProxy 统计页面: http://localhost:${HAPROXY_STATS_PORT}"

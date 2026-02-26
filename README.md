@@ -80,7 +80,6 @@ NETWORK_NAME=deploy-network
 
 # 端口配置（可选，使用默认值）
 HAPROXY_HTTP_PORT=80
-HAPROXY_STATS_PORT=8404
 ```
 
 **注意**:
@@ -302,7 +301,6 @@ docker compose restart haproxy
 | `CONTAINER_HAPROXY` | HAProxy 容器名称 | haproxy | 否 |
 | `NETWORK_NAME` | Docker 网络名称 | deploy-network | 否 |
 | `HAPROXY_HTTP_PORT` | HAProxy HTTP 端口 | 80 | 否 |
-| `HAPROXY_STATS_PORT` | HAProxy 统计页面端口 | 8404 | 否 |
 
 修改 `.env` 文件后，需要：
 1. 如果修改了容器名称：重新生成 HAProxy 配置 `./scripts/generate-haproxy-config.sh`
