@@ -85,7 +85,7 @@ docker compose up -d
 
 # 启动 HAProxy 容器
 log_info "启动 HAProxy 容器..."
-cd haproxy && docker compose up -d && cd ..
+docker compose -f docker-compose-haproxy.yml up -d
 
 # 等待服务启动
 log_info "等待服务启动..."

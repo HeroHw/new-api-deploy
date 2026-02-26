@@ -16,7 +16,7 @@ services:
       timeout: 5s
       retries: 3
     env_file:
-      - ../.env
+      - .env
 
 networks:
   deploy-network:
@@ -25,4 +25,4 @@ networks:
 
 volumes:
   haproxy-socket:
-    name: ${VOLUME_HAPROXY_SOCKET:-haproxy-socket}
+    name: haproxy-socket

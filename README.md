@@ -17,10 +17,9 @@
 deploy/
 ├── .env.example                 # 环境变量配置模板
 ├── docker-compose.yml           # 应用容器配置
-├── haproxy/
-│   ├── docker-compose.yml       # HAProxy 容器配置
-│   ├── haproxy.cfg              # HAProxy 配置文件（生成）
-│   └── haproxy.cfg.template     # HAProxy 配置模板
+├── docker-compose-haproxy.yml   # HAProxy 容器配置
+├── haproxy.cfg                  # HAProxy 配置文件（生成）
+├── haproxy.cfg.template         # HAProxy 配置模板
 ├── scripts/
 │   ├── generate-haproxy-config.sh  # HAProxy 配置生成脚本
 │   ├── switch-traffic.sh        # 流量切换脚本
@@ -48,8 +47,9 @@ cd /opt/newapi-test
 
 将以下文件上传到服务器：
 - `docker-compose.yml`
+- `docker-compose-haproxy.yml`
+- `haproxy.cfg.template`
 - `.env.example`
-- `haproxy/` 目录及其内容
 - `scripts/` 目录及其内容
 
 ### 3. 配置环境变量
@@ -107,9 +107,7 @@ docker compose up -d
 ### 7. 启动 HAProxy
 
 ```bash
-cd haproxy
-docker compose up -d
-cd ..
+docker compose -f docker-compose-haproxy.yml up -d
 ```
 
 ### 8. 验证部署
@@ -230,8 +228,7 @@ docker compose restart app-blue
 docker compose restart app-green
 
 # 重启 HAProxy
-cd haproxy
-docker compose restart haproxy
+docker compose -f docker-compose-haproxy.yml restart haproxy
 ```
 
 ### 停止服务
@@ -241,8 +238,7 @@ docker compose restart haproxy
 docker compose down
 
 # 停止 HAProxy
-cd haproxy
-docker compose down
+docker compose -f docker-compose-haproxy.yml down
 ```
 
 ## HAProxy 管理
@@ -272,8 +268,8 @@ echo "set server newapi_backend/blue weight 50" | socat stdio /run/haproxy/admin
 
 修改配置文件后重新加载：
 ```bash
-cd /opt/newapi-test/haproxy
-docker compose restart haproxy
+cd /opt/newapi-test
+docker compose -f docker-compose-haproxy.yml restart haproxy
 ```
 
 ## 网络配置
@@ -400,7 +396,8 @@ cat /opt/newapi-test/.active_env
 ```bash
 tar -czf deploy-backup-$(date +%Y%m%d).tar.gz \
   docker-compose.yml \
-  haproxy/ \
+  docker-compose-haproxy.yml \
+  haproxy.cfg.template \
   scripts/ \
   .active_env \
   *-history.log

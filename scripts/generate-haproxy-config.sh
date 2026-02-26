@@ -8,7 +8,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(dirname "$SCRIPT_DIR")"
-HAPROXY_DIR="${DEPLOY_DIR}/haproxy"
+HAPROXY_DIR="${DEPLOY_DIR}"
 
 # 颜色输出
 GREEN='\033[0;32m'
