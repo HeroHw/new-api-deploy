@@ -113,12 +113,13 @@ set_weight_via_config() {
 }
 
 # 尝试使用 Runtime API
-if docker exec ${CONTAINER_HAPROXY} test -S ${HAPROXY_SOCKET} 2>/dev/null; then
-    set_weight_via_api
-else
-    log_warn "HAProxy socket 不可用，使用配置重载方式"
-    set_weight_via_config
-fi
+# if docker exec ${CONTAINER_HAPROXY} test -S ${HAPROXY_SOCKET} 2>/dev/null; then
+#     set_weight_via_api
+# else
+#     log_warn "HAProxy socket 不可用，使用配置重载方式"
+#     set_weight_via_config
+# fi
+set_weight_via_config
 
 # 验证配置
 log_info "正在验证配置..."
