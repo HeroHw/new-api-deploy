@@ -24,8 +24,8 @@ CONTAINER_BLUE=${CONTAINER_BLUE:-app-blue}
 CONTAINER_GREEN=${CONTAINER_GREEN:-app-green}
 CONTAINER_HAPROXY=${CONTAINER_HAPROXY:-haproxy}
 
-HAPROXY_SOCKET="/run/haproxy/admin.sock"
-HAPROXY_CONFIG_DIR="${DEPLOY_DIR}/haproxy"
+HAPROXY_SOCKET="/tmp/admin.sock"
+HAPROXY_CONFIG_DIR="${DEPLOY_DIR}"
 
 # backend 名称前缀 (与 haproxy.cfg 中保持一致)
 BACKEND_PREFIX="newapi"

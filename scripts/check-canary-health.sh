@@ -25,7 +25,7 @@ CONTAINER_BLUE=${CONTAINER_BLUE:-app-blue}
 CONTAINER_GREEN=${CONTAINER_GREEN:-app-green}
 CONTAINER_HAPROXY=${CONTAINER_HAPROXY:-haproxy}
 
-HAPROXY_SOCKET="/run/haproxy/admin.sock"
+HAPROXY_SOCKET="/tmp/admin.sock"
 
 # 颜色输出
 RED='\033[0;31m'
