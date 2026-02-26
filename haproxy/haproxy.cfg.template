@@ -50,23 +50,23 @@ backend newapi_backend
 
     # 通过 weight 控制流量比例
     # 初始状态：blue 启用，green 禁用
-    server blue {{CONTAINER_BLUE}}:3000 check inter 5s fall 3 rise 2 weight 100 init-addr last,libc
-    server green {{CONTAINER_GREEN}}:3000 check inter 5s fall 3 rise 2 weight 0 disabled init-addr last,libc
+    server blue {{CONTAINER_BLUE}}:3000 check inter 5s fall 3 rise 2 weight 100 init-addr none,libc
+    server green {{CONTAINER_GREEN}}:3000 check inter 5s fall 3 rise 2 weight 0 disabled init-addr none,libc
 
 # 灰度后端 - 始终指向新版本环境
 backend newapi_canary
     option httpchk GET /api/status
     http-check expect status 200
-    server canary {{CONTAINER_GREEN}}:3000 check init-addr last,libc
+    server canary {{CONTAINER_GREEN}}:3000 check init-addr none,libc
 
 # Blue 后端 (直接测试用)
 backend newapi_blue
     option httpchk GET /api/status
     http-check expect status 200
-    server blue {{CONTAINER_BLUE}}:3000 check inter 5s fall 3 rise 2 weight 100 init-addr last,libc
+    server blue {{CONTAINER_BLUE}}:3000 check inter 5s fall 3 rise 2 weight 100 init-addr none,libc
 
 # Green 后端 (直接测试用)
 backend newapi_green
     option httpchk GET /api/status
     http-check expect status 200
-    server green {{CONTAINER_GREEN}}:3000 check inter 5s fall 3 rise 2 weight 0 disabled init-addr last,libc
+    server green {{CONTAINER_GREEN}}:3000 check inter 5s fall 3 rise 2 weight 0 disabled init-addr none,libc

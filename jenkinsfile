@@ -114,6 +114,65 @@ pipeline {
             }
         }
 
+        stage('确保 HAProxy 运行') {
+            steps {
+                script {
+                    echo "检查 HAProxy 容器状态..."
+                    sshagent([SSH_CREDENTIALS_ID]) {
+                        sh """
+                            ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} << ENDSSH
+                                cd ${DEPLOY_PATH}
+
+                                # 确保 .env 文件存在
+                                if [ ! -f "${DEPLOY_PATH}/.env" ]; then
+                                    echo "错误: ${DEPLOY_PATH}/.env 文件不存在"
+                                    exit 1
+                                fi
+
+                                # 加载 .env 文件获取容器名称
+                                cd ${DEPLOY_PATH}/haproxy
+                                set -a
+                                source ${DEPLOY_PATH}/.env
+                                set +a
+                                CONTAINER_HAPROXY=\${CONTAINER_HAPROXY:-haproxy}
+                                NETWORK_NAME=\${NETWORK_NAME:-deploy-network}
+
+                                # 检查 HAProxy 容器是否运行
+                                if ! docker ps --format '{{.Names}}' | grep -q "^\${CONTAINER_HAPROXY}\$"; then
+                                    echo "HAProxy 容器未运行，正在启动..."
+
+                                    # 确保网络存在
+                                    docker network inspect \${NETWORK_NAME} >/dev/null 2>&1 || docker network create \${NETWORK_NAME}
+
+                                    # 生成 HAProxy 配置文件（替换模板变量）
+                                    echo "生成 HAProxy 配置文件..."
+                                    ${DEPLOY_PATH}/scripts/generate-haproxy-config.sh
+
+                                    # 启动 HAProxy
+                                    cd ${DEPLOY_PATH}/haproxy
+                                    docker compose up -d
+
+                                    # 等待 HAProxy 启动
+                                    echo "等待 HAProxy 启动..."
+                                    sleep 5
+
+                                    # 验证 HAProxy 是否正常运行
+                                    if docker ps --format '{{.Names}}' | grep -q "^\${CONTAINER_HAPROXY}\$"; then
+                                        echo "HAProxy 启动成功"
+                                    else
+                                        echo "HAProxy 启动失败"
+                                        exit 1
+                                    fi
+                                else
+                                    echo "HAProxy 容器已运行"
+                                fi
+ENDSSH
+                        """
+                    }
+                }
+            }
+        }
+
         stage('部署到目标环境') {
             steps {
                 script {
@@ -126,6 +185,16 @@ pipeline {
                             ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} << ENDSSH
                                 cd ${DEPLOY_PATH}
 
+                                # 加载 .env 文件获取容器名称
+                                if [ -f .env ]; then
+                                    export \$(grep -v '^#' .env | xargs)
+                                fi
+                                CONTAINER_BLUE=\${CONTAINER_BLUE:-app-blue}
+                                CONTAINER_GREEN=\${CONTAINER_GREEN:-app-green}
+
+                                # 确保脚本有执行权限
+                                chmod +x ${DEPLOY_PATH}/scripts/*.sh 2>/dev/null || true
+
                                 # 登录 ACR
                                 echo '${ACR_CREDENTIALS_PSW}' | docker login ${ACR_REGISTRY} -u ${ACR_CREDENTIALS_USR} --password-stdin
 
@@ -135,19 +204,32 @@ pipeline {
                                 # 获取另一个环境的当前镜像标签
                                 if [ "${targetEnv}" = "blue" ]; then
                                     export BLUE_TAG="${IMAGE_TAG}"
-                                    export GREEN_TAG=\$(docker inspect app-green --format='{{.Config.Image}}' 2>/dev/null | awk -F: '{print \$NF}' | tr -d '[:space:]')
-                                    export GREEN_TAG=\${GREEN_TAG:-latest}
+                                    export GREEN_TAG=\$(docker inspect \$CONTAINER_GREEN --format='{{.Config.Image}}' 2>/dev/null | awk -F: '{print \$NF}' | tr -d '[:space:]')
+                                    export GREEN_TAG=\${GREEN_TAG:-${IMAGE_TAG}}
+                                    OTHER_CONTAINER="\$CONTAINER_GREEN"
                                 else
                                     export GREEN_TAG="${IMAGE_TAG}"
-                                    export BLUE_TAG=\$(docker inspect app-blue --format='{{.Config.Image}}' 2>/dev/null | awk -F: '{print \$NF}' | tr -d '[:space:]')
-                                    export BLUE_TAG=\${BLUE_TAG:-latest}
+                                    export BLUE_TAG=\$(docker inspect \$CONTAINER_BLUE --format='{{.Config.Image}}' 2>/dev/null | awk -F: '{print \$NF}' | tr -d '[:space:]')
+                                    export BLUE_TAG=\${BLUE_TAG:-${IMAGE_TAG}}
+                                    OTHER_CONTAINER="\$CONTAINER_BLUE"
                                 fi
 
                                 export ACR_REGISTRY="${ACR_REGISTRY}"
                                 export APP_NAME="${APP_NAME}"
 
-                                # 使用环境变量启动容器
-                                docker compose up -d --no-deps --force-recreate app-${targetEnv}
+                                # 检查是否为首次部署或另一个环境的容器不存在
+                                if [ "${env.CURRENT_ENV}" = "none" ]; then
+                                    echo "首次部署，启动 blue 和 green 两个环境"
+                                    export BLUE_TAG="${IMAGE_TAG}"
+                                    export GREEN_TAG="${IMAGE_TAG}"
+                                    docker compose up -d app-blue app-green
+                                elif ! docker ps -a --format '{{.Names}}' | grep -q "^\${OTHER_CONTAINER}\$"; then
+                                    echo "另一个环境容器 \${OTHER_CONTAINER} 不存在，同时启动两个环境"
+                                    docker compose up -d app-blue app-green
+                                else
+                                    echo "更新目标环境 ${targetEnv}"
+                                    docker compose up -d --no-deps --force-recreate app-${targetEnv}
+                                fi
 
                                 echo "已部署到 ${targetEnv}"
 ENDSSH
@@ -160,7 +242,6 @@ ENDSSH
         stage('健康检查') {
             steps {
                 script {
-                    def targetContainer = "app-${env.TARGET_ENV}"
                     def maxRetries = 30
                     def retryCount = 0
                     def healthy = false
@@ -172,7 +253,26 @@ ENDSSH
                             def response
                             sshagent([SSH_CREDENTIALS_ID]) {
                                 response = sh(
-                                    script: "ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} 'docker exec ${targetContainer} curl -sf http://localhost:3000/api/status'",
+                                    script: """
+                                        ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
+                                            cd ${DEPLOY_PATH}
+                                            # 加载 .env 文件获取容器名称
+                                            if [ -f .env ]; then
+                                                export \$(grep -v '^#' .env | xargs)
+                                            fi
+                                            # 设置默认值
+                                            CONTAINER_BLUE=\${CONTAINER_BLUE:-app-blue}
+                                            CONTAINER_GREEN=\${CONTAINER_GREEN:-app-green}
+                                            # 确定目标容器
+                                            if [ "${env.TARGET_ENV}" = "blue" ]; then
+                                                TARGET_CONTAINER="\$CONTAINER_BLUE"
+                                            else
+                                                TARGET_CONTAINER="\$CONTAINER_GREEN"
+                                            fi
+                                            # 执行健康检查
+                                            docker exec \$TARGET_CONTAINER curl -sf http://localhost:3000/api/status
+ENDSSH
+                                    """,
                                     returnStatus: true
                                 )
                             }
@@ -312,6 +412,8 @@ ENDSSH
             script {
                 echo "部署成功! ${env.TARGET_ENV} 环境已激活，版本: ${env.IMAGE_TAG}"
 
+                // TODO: 临时屏蔽飞书通知
+                /*
                 // 发送飞书成功通知
                 def appName = env.APP_NAME ?: 'N/A'
                 def deployEnv = env.TARGET_ENV ?: 'N/A'
@@ -414,6 +516,7 @@ ENDSSH
                         -H 'Content-Type: application/json' \\
                         -d '${message}'
                 """
+                */
             }
         }
 
@@ -435,6 +538,8 @@ ENDSSH
                     }
                 }
 
+                // TODO: 临时屏蔽飞书通知
+                /*
                 // 发送飞书失败通知
                 def appName = env.APP_NAME ?: 'N/A'
                 def targetEnv = env.TARGET_ENV ?: 'N/A'
@@ -550,6 +655,7 @@ ENDSSH
                 } else {
                     echo "飞书 Webhook URL 未配置，跳过通知"
                 }
+                */
             }
         }
 
