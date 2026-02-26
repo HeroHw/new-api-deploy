@@ -1,0 +1,27 @@
+services:
+  haproxy:
+    image: haproxy:2.9-alpine
+    container_name: ${CONTAINER_HAPROXY:-haproxy}
+    networks:
+      - deploy-network
+    ports:
+      - "${HAPROXY_HTTP_PORT:-80}:80"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - haproxy-socket:/run/haproxy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    env_file:
+      - ../.env
+
+networks:
+  deploy-network:
+    name: ${NETWORK_NAME:-deploy-network}
+    external: true
+
+volumes:
+  haproxy-socket:

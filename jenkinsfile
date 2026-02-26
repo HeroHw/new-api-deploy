@@ -1,0 +1,565 @@
+pipeline {
+    agent any
+
+    environment {
+        // ACR 配置
+        ACR_REGISTRY = credentials('acr-docker-registry')
+        ACR_CREDENTIALS = credentials('acr-docker-password')
+        APP_NAME = 'new-api-test'
+
+        // 部署服务器
+        DEPLOY_HOST = '127.0.0.1'
+        DEPLOY_USER = 'root'
+        DEPLOY_PATH = '/opt/newapi-test'
+        SSH_CREDENTIALS_ID = 'deploy-server-ssh'  // SSH 密钥凭据 ID
+
+        // 灰度发布配置
+        CANARY_STEPS = '10,30,50,100'  // 灰度流量比例阶梯
+        CANARY_INTERVAL = '60'          // 每个阶梯等待时间(秒)
+        ENABLE_CANARY = 'true'          // 是否启用灰度发布
+
+        // 飞书机器人配置
+        FEISHU_WEBHOOK = credentials('feishu-webhook')  // 飞书机器人 webhook URL 凭据 ID
+    }
+
+    parameters {
+        choice(
+            name: 'DEPLOY_MODE',
+            choices: ['canary', 'blue-green', 'direct'],
+            description: '部署模式: canary=灰度发布, blue-green=蓝绿切换, direct=直接切换'
+        )
+        string(
+            name: 'CANARY_PERCENTAGE',
+            defaultValue: '10,30,50,100',
+            description: '灰度流量比例阶梯 (逗号分隔)'
+        )
+        string(
+            name: 'CANARY_WAIT_TIME',
+            defaultValue: '60',
+            description: '每个灰度阶梯等待时间(秒)'
+        )
+        booleanParam(
+            name: 'AUTO_PROMOTE',
+            defaultValue: true,
+            description: '灰度验证通过后自动提升到100%'
+        )
+    }
+
+    stages {
+        stage('拉取代码') {
+            steps {
+                // TODO: 请修改为你的 Git 仓库地址、分支名和凭据 ID
+                git branch: 'main',
+                    url: 'https://github.com/username/repo.git',
+                    credentialsId: 'github-token'
+                script {
+                    env.GIT_COMMIT_MSG = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim()
+                    env.GIT_COMMIT = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                    env.IMAGE_TAG = "${BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
+                }
+            }
+        }
+
+        stage('构建镜像') {
+            steps {
+                script {
+                    echo "正在构建 Docker 镜像: ${ACR_REGISTRY}/${APP_NAME}:${IMAGE_TAG}"
+                    sh """
+                        docker build -t ${ACR_REGISTRY}/${APP_NAME}:${IMAGE_TAG} .
+                    """
+                }
+            }
+        }
+
+        stage('推送镜像') {
+            steps {
+                script {
+                    echo "正在推送镜像到阿里云 ACR"
+                    sh '''
+                        echo "$ACR_CREDENTIALS_PSW" | docker login "$ACR_REGISTRY" -u "$ACR_CREDENTIALS_USR" --password-stdin
+                        docker push "$ACR_REGISTRY"/"$APP_NAME":"$IMAGE_TAG"
+                    '''
+                }
+            }
+        }
+
+        stage('确定目标环境') {
+            steps {
+                script {
+                    // 获取当前活跃环境 (使用 SSH 密钥认证)
+                    def currentEnv
+                    sshagent([SSH_CREDENTIALS_ID]) {
+                        currentEnv = sh(
+                            script: "ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} 'cat ${DEPLOY_PATH}/.active_env 2>/dev/null || echo none'",
+                            returnStdout: true
+                        ).trim()
+                    }
+
+                    env.CURRENT_ENV = currentEnv
+
+                    // 确定目标环境
+                    if (currentEnv == 'none') {
+                        // 首次部署，目标是 blue
+                        env.TARGET_ENV = 'blue'
+                        echo "首次部署，目标环境: blue"
+                    } else {
+                        // 目标环境是非活跃的那个
+                        env.TARGET_ENV = (currentEnv == 'blue') ? 'green' : 'blue'
+                        echo "当前活跃环境: ${CURRENT_ENV}"
+                        echo "部署目标环境: ${TARGET_ENV}"
+                    }
+
+                    echo "部署模式: ${params.DEPLOY_MODE}"
+                }
+            }
+        }
+
+        stage('部署到目标环境') {
+            steps {
+                script {
+                    def fullImage = "${ACR_REGISTRY}/${APP_NAME}:${IMAGE_TAG}"
+                    def targetEnv = env.TARGET_ENV
+
+                    echo "正在部署 ${IMAGE_TAG} 到 ${TARGET_ENV} 环境"
+                    sshagent([SSH_CREDENTIALS_ID]) {
+                        sh """
+                            ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} << ENDSSH
+                                cd ${DEPLOY_PATH}
+
+                                # 登录 ACR
+                                echo '${ACR_CREDENTIALS_PSW}' | docker login ${ACR_REGISTRY} -u ${ACR_CREDENTIALS_USR} --password-stdin
+
+                                # 拉取新镜像
+                                docker pull ${fullImage}
+
+                                # 获取另一个环境的当前镜像标签
+                                if [ "${targetEnv}" = "blue" ]; then
+                                    export BLUE_TAG="${IMAGE_TAG}"
+                                    export GREEN_TAG=\$(docker inspect app-green --format='{{.Config.Image}}' 2>/dev/null | awk -F: '{print \$NF}' | tr -d '[:space:]')
+                                    export GREEN_TAG=\${GREEN_TAG:-latest}
+                                else
+                                    export GREEN_TAG="${IMAGE_TAG}"
+                                    export BLUE_TAG=\$(docker inspect app-blue --format='{{.Config.Image}}' 2>/dev/null | awk -F: '{print \$NF}' | tr -d '[:space:]')
+                                    export BLUE_TAG=\${BLUE_TAG:-latest}
+                                fi
+
+                                export ACR_REGISTRY="${ACR_REGISTRY}"
+                                export APP_NAME="${APP_NAME}"
+
+                                # 使用环境变量启动容器
+                                docker compose up -d --no-deps --force-recreate app-${targetEnv}
+
+                                echo "已部署到 ${targetEnv}"
+ENDSSH
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('健康检查') {
+            steps {
+                script {
+                    def targetContainer = "app-${env.TARGET_ENV}"
+                    def maxRetries = 30
+                    def retryCount = 0
+                    def healthy = false
+
+                    echo "正在等待 ${TARGET_ENV} 环境启动..."
+
+                    while (retryCount < maxRetries && !healthy) {
+                        try {
+                            def response
+                            sshagent([SSH_CREDENTIALS_ID]) {
+                                response = sh(
+                                    script: "ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} 'docker exec ${targetContainer} curl -sf http://localhost:3000/api/status'",
+                                    returnStatus: true
+                                )
+                            }
+                            if (response == 0) {
+                                healthy = true
+                                echo "${TARGET_ENV} 环境健康检查通过!"
+                            }
+                        } catch (Exception e) {
+                            // 忽略异常，继续重试
+                        }
+
+                        if (!healthy) {
+                            retryCount++
+                            echo "健康检查第 ${retryCount}/${maxRetries} 次失败，正在重试..."
+                            sleep(time: 5, unit: 'SECONDS')
+                        }
+                    }
+
+                    if (!healthy) {
+                        error("健康检查失败，已重试 ${maxRetries} 次")
+                    }
+                }
+            }
+        }
+
+        stage('灰度发布') {
+            when {
+                expression { params.DEPLOY_MODE == 'canary' && env.CURRENT_ENV != 'none' }
+            }
+            steps {
+                script {
+                    def canarySteps = params.CANARY_PERCENTAGE.split(',').collect { it.trim().toInteger() }
+                    def waitTime = params.CANARY_WAIT_TIME.toInteger()
+
+                    echo "开始灰度发布，流量阶梯: ${canarySteps}"
+
+                    for (int i = 0; i < canarySteps.size(); i++) {
+                        def percentage = canarySteps[i]
+
+                        // 跳过最后的 100%，留给流量切换阶段
+                        if (percentage == 100 && !params.AUTO_PROMOTE) {
+                            echo "灰度流量已达 ${canarySteps[i-1]}%，等待手动确认提升到 100%..."
+                            input message: "确认提升到 100%?", ok: "确认"
+                        }
+
+                        if (percentage < 100) {
+                            echo "正在设置灰度流量为 ${percentage}%"
+
+                            sshagent([SSH_CREDENTIALS_ID]) {
+                                sh "ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} '${DEPLOY_PATH}/scripts/set-canary-weight.sh ${CURRENT_ENV} ${TARGET_ENV} ${percentage}'"
+                            }
+
+                            // 等待并监控
+                            echo "等待 ${waitTime} 秒并监控指标..."
+                            sleep(time: waitTime, unit: 'SECONDS')
+
+                            // 验证灰度环境健康状态
+                            def healthCheck
+                            sshagent([SSH_CREDENTIALS_ID]) {
+                                healthCheck = sh(
+                                    script: "ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} '${DEPLOY_PATH}/scripts/check-canary-health.sh ${TARGET_ENV}'",
+                                    returnStatus: true
+                                )
+                            }
+
+                            if (healthCheck != 0) {
+                                echo "灰度健康检查在 ${percentage}% 时失败! 正在回滚..."
+                                sshagent([SSH_CREDENTIALS_ID]) {
+                                    sh "ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} '${DEPLOY_PATH}/scripts/set-canary-weight.sh ${CURRENT_ENV} ${TARGET_ENV} 0'"
+                                }
+                                error("灰度发布在 ${percentage}% 时失败")
+                            }
+
+                            echo "灰度 ${percentage}% - 健康检查通过"
+                        }
+                    }
+
+                    echo "灰度发布成功，准备全量切换"
+                }
+            }
+        }
+
+        stage('流量切换') {
+            steps {
+                script {
+                    echo "正在将流量从 ${CURRENT_ENV} 切换到 ${TARGET_ENV}"
+                    sshagent([SSH_CREDENTIALS_ID]) {
+                        sh """
+                            ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} << ENDSSH
+                                # 使用切换脚本 (100% 流量)
+                                ${DEPLOY_PATH}/scripts/switch-traffic.sh ${env.TARGET_ENV}
+
+                                # 记录当前活跃环境
+                                echo "${env.TARGET_ENV}" > ${DEPLOY_PATH}/.active_env
+
+                                echo "流量已切换到 ${env.TARGET_ENV}"
+ENDSSH
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('验证部署') {
+            steps {
+                script {
+                    echo "正在验证部署..."
+                    sshagent([SSH_CREDENTIALS_ID]) {
+                        sh """
+                            ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
+                                # 验证流量已切换
+                                response=\$(curl -sf http://localhost/api/status)
+                                echo "健康检查响应: \$response"
+ENDSSH
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('标记稳定版本') {
+            steps {
+                script {
+                    echo "部署验证通过，正在将 ${IMAGE_TAG} 标记为 latest"
+                    sh """
+                        docker tag ${ACR_REGISTRY}/${APP_NAME}:${IMAGE_TAG} ${ACR_REGISTRY}/${APP_NAME}:latest
+                        echo ${ACR_CREDENTIALS_PSW} | docker login ${ACR_REGISTRY} -u ${ACR_CREDENTIALS_USR} --password-stdin
+                        docker push ${ACR_REGISTRY}/${APP_NAME}:latest
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                echo "部署成功! ${env.TARGET_ENV} 环境已激活，版本: ${env.IMAGE_TAG}"
+
+                // 发送飞书成功通知
+                def appName = env.APP_NAME ?: 'N/A'
+                def deployEnv = env.TARGET_ENV ?: 'N/A'
+                def imageTag = env.IMAGE_TAG ?: 'N/A'
+                // 转义提交信息中的特殊字符
+                def commitMsg = (env.GIT_COMMIT_MSG ?: 'N/A')
+                    .replace('\\', '\\\\')
+                    .replace('"', '\\"')
+                    .replace('\n', '\\n')
+                    .replace('\r', '')
+                def deployMode = params.DEPLOY_MODE ?: 'N/A'
+
+                def message = """
+                {
+                    "msg_type": "interactive",
+                    "card": {
+                        "header": {
+                            "title": {
+                                "tag": "plain_text",
+                                "content": "✅ 部署成功"
+                            },
+                            "template": "green"
+                        },
+                        "elements": [
+                            {
+                                "tag": "div",
+                                "fields": [
+                                    {
+                                        "is_short": true,
+                                        "text": {
+                                            "tag": "lark_md",
+                                            "content": "**项目名称:**\\n${appName}"
+                                        }
+                                    },
+                                    {
+                                        "is_short": true,
+                                        "text": {
+                                            "tag": "lark_md",
+                                            "content": "**构建编号:**\\n#${BUILD_NUMBER}"
+                                        }
+                                    },
+                                    {
+                                        "is_short": true,
+                                        "text": {
+                                            "tag": "lark_md",
+                                            "content": "**部署环境:**\\n${deployEnv}"
+                                        }
+                                    },
+                                    {
+                                        "is_short": true,
+                                        "text": {
+                                            "tag": "lark_md",
+                                            "content": "**镜像版本:**\\n${imageTag}"
+                                        }
+                                    },
+                                    {
+                                        "is_short": false,
+                                        "text": {
+                                            "tag": "lark_md",
+                                            "content": "**提交信息:**\\n${commitMsg}"
+                                        }
+                                    },
+                                    {
+                                        "is_short": true,
+                                        "text": {
+                                            "tag": "lark_md",
+                                            "content": "**部署模式:**\\n${deployMode}"
+                                        }
+                                    },
+                                    {
+                                        "is_short": true,
+                                        "text": {
+                                            "tag": "lark_md",
+                                            "content": "**构建时长:**\\n${currentBuild.durationString.replace(' and counting', '')}"
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                "tag": "action",
+                                "actions": [
+                                    {
+                                        "tag": "button",
+                                        "text": {
+                                            "tag": "plain_text",
+                                            "content": "查看构建详情"
+                                        },
+                                        "type": "default",
+                                        "url": "${BUILD_URL}"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+                """
+
+                sh """
+                    curl -X POST '${env.FEISHU_WEBHOOK}' \\
+                        -H 'Content-Type: application/json' \\
+                        -d '${message}'
+                """
+            }
+        }
+
+        failure {
+            echo "部署失败! 正在回滚..."
+            script {
+                if (env.CURRENT_ENV && env.TARGET_ENV) {
+                    sshagent([SSH_CREDENTIALS_ID]) {
+                        sh """
+                            ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} << ENDSSH
+                                # 重置灰度流量
+                                ${DEPLOY_PATH}/scripts/set-canary-weight.sh ${env.CURRENT_ENV} ${env.TARGET_ENV} 0 2>/dev/null || true
+                                # 切换回原环境
+                                ${DEPLOY_PATH}/scripts/switch-traffic.sh ${env.CURRENT_ENV}
+                                echo "${env.CURRENT_ENV}" > ${DEPLOY_PATH}/.active_env
+                                echo "已回滚到 ${env.CURRENT_ENV}"
+ENDSSH
+                        """
+                    }
+                }
+
+                // 发送飞书失败通知
+                def appName = env.APP_NAME ?: 'N/A'
+                def targetEnv = env.TARGET_ENV ?: 'N/A'
+                def imageTag = env.IMAGE_TAG ?: 'N/A'
+                // 转义提交信息中的特殊字符
+                def commitMsg = (env.GIT_COMMIT_MSG ?: 'N/A')
+                    .replace('\\', '\\\\')
+                    .replace('"', '\\"')
+                    .replace('\n', '\\n')
+                    .replace('\r', '')
+                def deployMode = params.DEPLOY_MODE ?: 'N/A'
+                def currentEnv = env.CURRENT_ENV ?: '原环境'
+                def webhookUrl = env.FEISHU_WEBHOOK ?: ''
+
+                if (webhookUrl && webhookUrl != 'null' && webhookUrl.startsWith('http')) {
+                    def message = """
+                    {
+                        "msg_type": "interactive",
+                        "card": {
+                            "header": {
+                                "title": {
+                                    "tag": "plain_text",
+                                    "content": "❌ 部署失败"
+                                },
+                                "template": "red"
+                            },
+                            "elements": [
+                                {
+                                    "tag": "div",
+                                    "fields": [
+                                        {
+                                            "is_short": true,
+                                            "text": {
+                                                "tag": "lark_md",
+                                                "content": "**项目名称:**\\n${appName}"
+                                            }
+                                        },
+                                        {
+                                            "is_short": true,
+                                            "text": {
+                                                "tag": "lark_md",
+                                                "content": "**构建编号:**\\n#${BUILD_NUMBER}"
+                                            }
+                                        },
+                                        {
+                                            "is_short": true,
+                                            "text": {
+                                                "tag": "lark_md",
+                                                "content": "**目标环境:**\\n${targetEnv}"
+                                            }
+                                        },
+                                        {
+                                            "is_short": true,
+                                            "text": {
+                                                "tag": "lark_md",
+                                                "content": "**镜像版本:**\\n${imageTag}"
+                                            }
+                                        },
+                                        {
+                                            "is_short": false,
+                                            "text": {
+                                                "tag": "lark_md",
+                                                "content": "**提交信息:**\\n${commitMsg}"
+                                            }
+                                        },
+                                        {
+                                            "is_short": true,
+                                            "text": {
+                                                "tag": "lark_md",
+                                                "content": "**部署模式:**\\n${deployMode}"
+                                            }
+                                        },
+                                        {
+                                            "is_short": true,
+                                            "text": {
+                                                "tag": "lark_md",
+                                                "content": "**失败时长:**\\n${currentBuild.durationString.replace(' and counting', '')}"
+                                            }
+                                        },
+                                        {
+                                            "is_short": false,
+                                            "text": {
+                                                "tag": "lark_md",
+                                                "content": "**状态:**\\n已自动回滚到 ${currentEnv}"
+                                            }
+                                        }
+                                    ]
+                                },
+                                {
+                                    "tag": "action",
+                                    "actions": [
+                                        {
+                                            "tag": "button",
+                                            "text": {
+                                                "tag": "plain_text",
+                                                "content": "查看失败日志"
+                                            },
+                                            "type": "danger",
+                                            "url": "${BUILD_URL}console"
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                    """
+
+                    sh """
+                        curl -X POST '${webhookUrl}' \\
+                            -H 'Content-Type: application/json' \\
+                            -d '${message}'
+                    """
+                } else {
+                    echo "飞书 Webhook URL 未配置，跳过通知"
+                }
+            }
+        }
+
+        always {
+            // 清理本地 Docker 镜像
+            script {
+                if (env.IMAGE_TAG) {
+                    sh "docker rmi ${ACR_REGISTRY}/${APP_NAME}:${IMAGE_TAG} || true"
+                }
+            }
+        }
+    }
+}

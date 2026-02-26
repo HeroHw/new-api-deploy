@@ -1,0 +1,45 @@
+services:
+  # Blue 环境
+  app-blue:
+    image: ${ACR_REGISTRY}/${APP_NAME}:${BLUE_TAG}
+    container_name: ${CONTAINER_BLUE:-app-blue}
+    networks:
+      - deploy-network
+    expose:
+      - "3000"
+    environment:
+      - APP_COLOR=blue
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    env_file:
+      - .env
+
+  # Green 环境
+  app-green:
+    image: ${ACR_REGISTRY}/${APP_NAME}:${GREEN_TAG}
+    container_name: ${CONTAINER_GREEN:-app-green}
+    networks:
+      - deploy-network
+    expose:
+      - "3000"
+    environment:
+      - APP_COLOR=green
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    env_file:
+      - .env
+
+networks:
+  deploy-network:
+    name: ${NETWORK_NAME:-deploy-network}
+    external: true

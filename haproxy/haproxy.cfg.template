@@ -1,0 +1,72 @@
+global
+    log stdout format raw local0
+    stats socket /run/haproxy/admin.sock mode 660 level admin expose-fd listeners
+    stats timeout 30s
+    maxconn 4096
+
+defaults
+    log global
+    mode http
+    option httplog
+    option dontlognull
+    timeout connect 5000
+    timeout client  50000
+    timeout server  50000
+
+# Stats 页面
+listen stats
+    bind *:8404
+    stats enable
+    stats uri /
+    stats refresh 10s
+    stats show-legends
+    stats show-node
+
+# 主前端 - 接收所有流量
+frontend newapi_front
+    bind *:80
+
+    # 通过 header 路由到特定环境进行测试
+    acl is_blue_test hdr(X-Target-Env) -i blue
+    acl is_green_test hdr(X-Target-Env) -i green
+
+    # 灰度测试：特定用户/请求强制走新版本
+    acl is_canary_user hdr(X-Canary) -i true
+    acl is_canary_cookie cook(canary) -i true
+
+    use_backend newapi_blue if is_blue_test
+    use_backend newapi_green if is_green_test
+
+    # 灰度用户强制走新版本后端
+    use_backend newapi_canary if is_canary_user or is_canary_cookie
+
+    default_backend newapi_backend
+
+# 主后端 - 蓝绿切换 + 灰度流量分配
+backend newapi_backend
+    balance roundrobin
+    option httpchk GET /api/status
+    http-check expect status 200
+
+    # 通过 weight 控制流量比例
+    # 初始状态：blue 启用，green 禁用
+    server blue {{CONTAINER_BLUE}}:3000 check inter 5s fall 3 rise 2 weight 100 init-addr last,libc
+    server green {{CONTAINER_GREEN}}:3000 check inter 5s fall 3 rise 2 weight 0 disabled init-addr last,libc
+
+# 灰度后端 - 始终指向新版本环境
+backend newapi_canary
+    option httpchk GET /api/status
+    http-check expect status 200
+    server canary {{CONTAINER_GREEN}}:3000 check init-addr last,libc
+
+# Blue 后端 (直接测试用)
+backend newapi_blue
+    option httpchk GET /api/status
+    http-check expect status 200
+    server blue {{CONTAINER_BLUE}}:3000 check inter 5s fall 3 rise 2 weight 100 init-addr last,libc
+
+# Green 后端 (直接测试用)
+backend newapi_green
+    option httpchk GET /api/status
+    http-check expect status 200
+    server green {{CONTAINER_GREEN}}:3000 check inter 5s fall 3 rise 2 weight 0 disabled init-addr last,libc
