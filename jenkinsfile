@@ -114,65 +114,6 @@ pipeline {
             }
         }
 
-        stage('确保 HAProxy 运行') {
-            steps {
-                script {
-                    echo "检查 HAProxy 容器状态..."
-                    sshagent([SSH_CREDENTIALS_ID]) {
-                        sh """
-                            ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} << ENDSSH
-                                cd ${DEPLOY_PATH}
-
-                                # 确保 .env 文件存在
-                                if [ ! -f "${DEPLOY_PATH}/.env" ]; then
-                                    echo "错误: ${DEPLOY_PATH}/.env 文件不存在"
-                                    exit 1
-                                fi
-
-                                # 加载 .env 文件获取容器名称
-                                cd ${DEPLOY_PATH}/haproxy
-                                set -a
-                                source ${DEPLOY_PATH}/.env
-                                set +a
-                                CONTAINER_HAPROXY=\${CONTAINER_HAPROXY:-haproxy}
-                                NETWORK_NAME=\${NETWORK_NAME:-deploy-network}
-
-                                # 检查 HAProxy 容器是否运行
-                                if ! docker ps --format '{{.Names}}' | grep -q "^\${CONTAINER_HAPROXY}\$"; then
-                                    echo "HAProxy 容器未运行，正在启动..."
-
-                                    # 确保网络存在
-                                    docker network inspect \${NETWORK_NAME} >/dev/null 2>&1 || docker network create \${NETWORK_NAME}
-
-                                    # 生成 HAProxy 配置文件（替换模板变量）
-                                    echo "生成 HAProxy 配置文件..."
-                                    ${DEPLOY_PATH}/scripts/generate-haproxy-config.sh
-
-                                    # 启动 HAProxy
-                                    cd ${DEPLOY_PATH}/haproxy
-                                    docker compose up -d
-
-                                    # 等待 HAProxy 启动
-                                    echo "等待 HAProxy 启动..."
-                                    sleep 5
-
-                                    # 验证 HAProxy 是否正常运行
-                                    if docker ps --format '{{.Names}}' | grep -q "^\${CONTAINER_HAPROXY}\$"; then
-                                        echo "HAProxy 启动成功"
-                                    else
-                                        echo "HAProxy 启动失败"
-                                        exit 1
-                                    fi
-                                else
-                                    echo "HAProxy 容器已运行"
-                                fi
-ENDSSH
-                        """
-                    }
-                }
-            }
-        }
-
         stage('部署到目标环境') {
             steps {
                 script {
@@ -412,8 +353,6 @@ ENDSSH
             script {
                 echo "部署成功! ${env.TARGET_ENV} 环境已激活，版本: ${env.IMAGE_TAG}"
 
-                // TODO: 临时屏蔽飞书通知
-                /*
                 // 发送飞书成功通知
                 def appName = env.APP_NAME ?: 'N/A'
                 def deployEnv = env.TARGET_ENV ?: 'N/A'
@@ -516,7 +455,6 @@ ENDSSH
                         -H 'Content-Type: application/json' \\
                         -d '${message}'
                 """
-                */
             }
         }
 
@@ -538,8 +476,6 @@ ENDSSH
                     }
                 }
 
-                // TODO: 临时屏蔽飞书通知
-                /*
                 // 发送飞书失败通知
                 def appName = env.APP_NAME ?: 'N/A'
                 def targetEnv = env.TARGET_ENV ?: 'N/A'
@@ -655,7 +591,6 @@ ENDSSH
                 } else {
                     echo "飞书 Webhook URL 未配置，跳过通知"
                 }
-                */
             }
         }
 
