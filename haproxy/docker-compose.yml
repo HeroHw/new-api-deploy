@@ -25,3 +25,4 @@ networks:
 
 volumes:
   haproxy-socket:
+    name: ${VOLUME_HAPROXY_SOCKET:-haproxy-socket}
