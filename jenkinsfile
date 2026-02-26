@@ -6,6 +6,7 @@ pipeline {
         ACR_REGISTRY = credentials('acr-docker-registry')
         ACR_CREDENTIALS = credentials('acr-docker-password')
         APP_NAME = 'new-api-test'
+        PROJECT_NAME = '测试-中转站'
 
         // 部署服务器
         DEPLOY_HOST = '127.0.0.1'
@@ -354,7 +355,7 @@ ENDSSH
                 echo "部署成功! ${env.TARGET_ENV} 环境已激活，版本: ${env.IMAGE_TAG}"
 
                 // 发送飞书成功通知
-                def appName = env.APP_NAME ?: 'N/A'
+                def projectName = env.PROJECT_NAME ?: env.APP_NAME ?: 'N/A'
                 def deployEnv = env.TARGET_ENV ?: 'N/A'
                 def imageTag = env.IMAGE_TAG ?: 'N/A'
                 // 转义提交信息中的特殊字符
@@ -384,7 +385,7 @@ ENDSSH
                                         "is_short": true,
                                         "text": {
                                             "tag": "lark_md",
-                                            "content": "**项目名称:**\\n${appName}"
+                                            "content": "**项目名称:**\\n${projectName}"
                                         }
                                     },
                                     {
@@ -477,7 +478,7 @@ ENDSSH
                 }
 
                 // 发送飞书失败通知
-                def appName = env.APP_NAME ?: 'N/A'
+                def projectName = env.PROJECT_NAME ?: env.APP_NAME ?: 'N/A'
                 def targetEnv = env.TARGET_ENV ?: 'N/A'
                 def imageTag = env.IMAGE_TAG ?: 'N/A'
                 // 转义提交信息中的特殊字符
@@ -510,7 +511,7 @@ ENDSSH
                                             "is_short": true,
                                             "text": {
                                                 "tag": "lark_md",
-                                                "content": "**项目名称:**\\n${appName}"
+                                                "content": "**项目名称:**\\n${projectName}"
                                             }
                                         },
                                         {
