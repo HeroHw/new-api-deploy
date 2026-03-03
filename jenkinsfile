@@ -2,6 +2,11 @@ pipeline {
     agent any
 
     environment {
+        // Git 配置
+        GIT_BRANCH = 'main'  // 要拉取的分支名
+        GIT_REPO_URL = 'https://github.com/username/repo.git'  // Git 仓库地址
+        GIT_CREDENTIALS_ID = 'github-token'  // Git 凭据 ID
+
         // ACR 配置
         ACR_REGISTRY = credentials('acr-docker-registry')
         ACR_CREDENTIALS = credentials('acr-docker-password')
@@ -9,8 +14,8 @@ pipeline {
         PROJECT_NAME = '测试-中转站'
 
         // 部署服务器
-        DEPLOY_HOST = '127.0.0.1'
-        DEPLOY_USER = 'root'
+        DEPLOY_HOST = credentials('deploy-ip')
+        DEPLOY_USER = credentials('deploy-user')
         DEPLOY_PATH = '/opt/newapi-test'
         SSH_CREDENTIALS_ID = 'deploy-server-ssh'  // SSH 密钥凭据 ID
 
@@ -49,14 +54,19 @@ pipeline {
     stages {
         stage('拉取代码') {
             steps {
-                // TODO: 请修改为你的 Git 仓库地址、分支名和凭据 ID
-                git branch: 'main',
-                    url: 'https://github.com/username/repo.git',
-                    credentialsId: 'github-token'
                 script {
+                    echo "正在从分支 ${env.GIT_BRANCH} 拉取代码..."
+                    git branch: env.GIT_BRANCH,
+                        url: env.GIT_REPO_URL,
+                        credentialsId: env.GIT_CREDENTIALS_ID
+
                     env.GIT_COMMIT_MSG = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim()
                     env.GIT_COMMIT = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
                     env.IMAGE_TAG = "${BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
+
+                    echo "已拉取分支: ${env.GIT_BRANCH}"
+                    echo "提交信息: ${env.GIT_COMMIT_MSG}"
+                    echo "提交哈希: ${env.GIT_COMMIT}"
                 }
             }
         }
