@@ -6,7 +6,6 @@ pipeline {
 
     environment {
         // Git 配置
-        GIT_BRANCH = 'main'
         GIT_REPO_URL = 'https://github.com/dimleap/apiqik-backend.git'
         GIT_CREDENTIALS_ID = 'github-token'
 
@@ -24,6 +23,13 @@ pipeline {
     }
 
     parameters {
+        // 代码分支选择
+        string(
+            name: 'GIT_BRANCH',
+            defaultValue: 'main',
+            description: '要构建的代码分支（例如: main, develop, feature/xxx）'
+        )
+
         // 构建模式选择
         choice(
             name: 'BUILD_MODE',
@@ -99,11 +105,11 @@ pipeline {
             }
             steps {
                 script {
-                    echo "正在从分支 ${env.GIT_BRANCH} 拉取代码..."
+                    echo "正在从分支 ${params.GIT_BRANCH} 拉取代码..."
 
                     def scmVars = checkout([
                         $class: 'GitSCM',
-                        branches: [[name: "*/${env.GIT_BRANCH}"]],
+                        branches: [[name: "*/${params.GIT_BRANCH}"]],
                         userRemoteConfigs: [[
                             url: env.GIT_REPO_URL,
                             credentialsId: env.GIT_CREDENTIALS_ID
@@ -119,7 +125,7 @@ pipeline {
                     // 重新计算 IMAGE_TAG（格式：v20260304）
                     env.IMAGE_TAG = "v${new Date().format('yyyyMMdd')}"
 
-                    echo "已拉取分支: ${env.GIT_BRANCH}"
+                    echo "已拉取分支: ${params.GIT_BRANCH}"
                     echo "提交信息: ${env.GIT_COMMIT_MSG}"
                     echo "提交哈希: ${env.GIT_COMMIT}"
                     echo "镜像标签: ${env.IMAGE_TAG}"
