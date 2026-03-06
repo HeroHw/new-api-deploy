@@ -131,9 +131,29 @@ switch_via_config_reload() {
 
     mv "$temp_file" "${HAPROXY_CONFIG_DIR}/haproxy.cfg"
 
-    # 重新加载 HAProxy 容器
-    docker exec ${CONTAINER_HAPROXY} haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg && \
-    docker exec ${CONTAINER_HAPROXY} kill -USR2 1
+    # 验证配置文件语法
+    log_info "验证配置文件语法..."
+    if ! docker exec ${CONTAINER_HAPROXY} haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg; then
+        log_error "配置文件语法错误，中止切换"
+        exit 1
+    fi
+
+    # 重新加载 HAProxy 配置（使用 graceful reload）
+    log_info "重新加载 HAProxy 配置..."
+    if docker exec ${CONTAINER_HAPROXY} kill -USR2 1; then
+        # 等待配置生效
+        sleep 3
+        log_info "配置已通过 graceful reload 重新加载"
+    else
+        log_warn "Graceful reload 失败，尝试重启 HAProxy 容器..."
+        docker restart ${CONTAINER_HAPROXY}
+        sleep 5
+        log_info "HAProxy 容器已重启"
+    fi
+
+    # 验证配置是否生效
+    log_info "验证配置是否生效..."
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'show servers state ${BACKEND_PREFIX}_backend' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
 
     log_info "通过配置重载切换成功"
 }
@@ -152,6 +172,30 @@ sleep 2
 
 # 检查 HAProxy stats
 docker exec ${CONTAINER_HAPROXY} sh -c "echo 'show servers state' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
+
+# 停止旧环境容器
+stop_old_container() {
+    local env=$1
+    local container
+
+    if [[ "$env" == "blue" ]]; then
+        container="${CONTAINER_BLUE}"
+    else
+        container="${CONTAINER_GREEN}"
+    fi
+
+    log_info "正在停止 ${env} 环境容器 (${container})..."
+
+    if docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
+        docker stop ${container}
+        log_info "${env} 环境容器已停止"
+    else
+        log_warn "${env} 环境容器未运行，跳过停止操作"
+    fi
+}
+
+# 停止源环境（旧版本）
+stop_old_container "$SOURCE_ENV"
 
 log_info "流量切换完成，${TARGET_ENV} 环境已激活"
 
