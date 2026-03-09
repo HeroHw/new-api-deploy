@@ -45,8 +45,18 @@ log_info "HAProxy 镜像构建完成"
 log_info "步骤 3: 启动 HAProxy 容器..."
 docker compose -f docker-compose-haproxy.yml up -d
 
-# 等待启动
-sleep 3
+# 等待 HAProxy 完全启动
+log_info "等待 HAProxy 完全启动..."
+sleep 5
+
+# 检查容器状态
+if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_HAPROXY:-haproxy}$"; then
+    log_error "HAProxy 容器未运行"
+    docker logs ${CONTAINER_HAPROXY:-haproxy}
+    exit 1
+fi
+
+log_info "HAProxy 容器已启动"
 
 # 步骤 4: 验证 socat 是否可用
 log_info "步骤 4: 验证 socat 是否已安装..."
@@ -59,12 +69,32 @@ fi
 
 # 步骤 5: 验证 Runtime API socket
 log_info "步骤 5: 验证 Runtime API socket..."
-if docker exec ${CONTAINER_HAPROXY:-haproxy} test -S /tmp/admin.sock 2>/dev/null; then
-    log_info "✅ Runtime API socket 可用"
-else
-    log_error "❌ Runtime API socket 不可用"
-    exit 1
-fi
+
+# 先检查 socket 文件是否存在
+log_info "检查 socket 文件..."
+docker exec ${CONTAINER_HAPROXY:-haproxy} ls -la /tmp/admin.sock 2>&1 || log_warn "Socket 文件不存在或无法访问"
+
+# 检查 HAProxy 进程
+log_info "检查 HAProxy 进程..."
+docker exec ${CONTAINER_HAPROXY:-haproxy} ps aux | grep haproxy || true
+
+# 等待 socket 创建（最多 10 秒）
+for i in {1..10}; do
+    if docker exec ${CONTAINER_HAPROXY:-haproxy} test -S /tmp/admin.sock 2>/dev/null; then
+        log_info "✅ Runtime API socket 可用"
+        break
+    fi
+
+    if [ $i -eq 10 ]; then
+        log_error "❌ Runtime API socket 不可用"
+        log_error "HAProxy 日志："
+        docker logs ${CONTAINER_HAPROXY:-haproxy} 2>&1 | tail -20
+        exit 1
+    fi
+
+    log_info "等待 socket 创建... ($i/10)"
+    sleep 1
+done
 
 # 步骤 6: 测试 Runtime API
 log_info "步骤 6: 测试 Runtime API..."
