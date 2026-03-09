@@ -1,7 +1,9 @@
 FROM haproxy:2.9-alpine
 
-# 安装 socat
+# 切换到 root 用户安装 socat
+USER root
 RUN apk add --no-cache socat
 
-# 复制配置文件
-COPY haproxy.cfg /usr/local/etc/haproxy/haproxy.cfg
+# 切换回 haproxy 用户（如果需要）
+# USER haproxy
+
