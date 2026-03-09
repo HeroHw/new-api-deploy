@@ -1,11 +1,15 @@
 services:
   haproxy:
-    image: haproxy:2.9-alpine
+    build:
+      context: .
+      dockerfile: Dockerfile.haproxy
+    image: ${ACR_REGISTRY}/${APP_NAME}-haproxy:latest
     container_name: ${CONTAINER_HAPROXY:-haproxy}
     networks:
       - deploy-network
     ports:
       - "${HAPROXY_HTTP_PORT:-80}:80"
+      - "${HAPROXY_STATS_PORT:-8404}:8404"
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
       - haproxy-socket:/run/haproxy

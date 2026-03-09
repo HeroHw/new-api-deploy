@@ -112,8 +112,56 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_HAPROXY}$"; then
     exit 1
 fi
 
-# 切换流量（修改配置文件并重载）
+# 切换流量（使用 Runtime API，零中断）
 log_info "正在切换流量到 ${TARGET_ENV}..."
+
+HAPROXY_SOCKET="/tmp/admin.sock"
+
+# 检查 socat 是否可用
+if ! docker exec ${CONTAINER_HAPROXY} which socat >/dev/null 2>&1; then
+    log_error "HAProxy 容器内未安装 socat，请重新构建 HAProxy 镜像"
+    exit 1
+fi
+
+# 检查 socket 是否可用
+if ! docker exec ${CONTAINER_HAPROXY} test -S ${HAPROXY_SOCKET} 2>/dev/null; then
+    log_error "HAProxy Runtime API socket 不可用"
+    exit 1
+fi
+
+# 使用 Runtime API 切换流量
+log_info "通过 Runtime API 切换流量（零中断）..."
+
+if [[ "$TARGET_ENV" == "blue" ]]; then
+    # 切换到 blue
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/blue state ready' | socat stdio ${HAPROXY_SOCKET}"
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/blue weight 100' | socat stdio ${HAPROXY_SOCKET}"
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/green weight 0' | socat stdio ${HAPROXY_SOCKET}"
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/green state maint' | socat stdio ${HAPROXY_SOCKET}"
+
+    # 同时更新测试后端
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_blue/blue state ready' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_blue/blue weight 100' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_green/green weight 0' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_green/green state maint' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
+else
+    # 切换到 green
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/green state ready' | socat stdio ${HAPROXY_SOCKET}"
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/green weight 100' | socat stdio ${HAPROXY_SOCKET}"
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/blue weight 0' | socat stdio ${HAPROXY_SOCKET}"
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/blue state maint' | socat stdio ${HAPROXY_SOCKET}"
+
+    # 同时更新测试后端
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_green/green state ready' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_green/green weight 100' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_blue/blue weight 0' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_blue/blue state maint' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
+fi
+
+log_info "Runtime API 切换成功（零中断）"
+
+# 持久化配置到文件（容器重启后保持）
+log_info "持久化配置到文件..."
 
 temp_file="${HAPROXY_CONFIG_DIR}/haproxy.cfg.tmp"
 blue_container="${CONTAINER_BLUE}"
@@ -131,21 +179,7 @@ else
 fi
 
 mv "$temp_file" "${HAPROXY_CONFIG_DIR}/haproxy.cfg"
-
-# 验证配置文件语法
-log_info "验证配置文件语法..."
-if ! docker exec ${CONTAINER_HAPROXY} haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg; then
-    log_error "配置文件语法错误，中止切换"
-    exit 1
-fi
-
-# 重新加载 HAProxy 配置（graceful reload，无中断）
-log_info "重新加载 HAProxy 配置..."
-docker exec ${CONTAINER_HAPROXY} kill -USR2 1
-
-# 等待配置生效
-sleep 2
-log_info "配置已重新加载"
+log_info "配置文件已持久化"
 
 # 验证切换结果
 log_info "正在验证切换结果..."

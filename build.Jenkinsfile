@@ -17,9 +17,6 @@ pipeline {
 
         // 飞书机器人配置
         FEISHU_WEBHOOK = credentials('feishu-webhook')
-
-        // 镜像标签（格式：v20260304）
-        IMAGE_TAG = "v${new Date().format('yyyyMMdd')}"
     }
 
     parameters {
@@ -93,7 +90,9 @@ pipeline {
                         env.GIT_COMMIT = 'N/A'
                         env.GIT_COMMIT_MSG = '手动触发部署'
                     } else {
-                        echo "✅ build_and_deploy 模式，将自动生成镜像标签"
+                        // build_and_deploy 模式，自动生成镜像标签
+                        env.IMAGE_TAG = "v${new Date().format('yyyyMMdd')}"
+                        echo "✅ build_and_deploy 模式，将自动生成镜像标签: ${env.IMAGE_TAG}"
                     }
                 }
             }
@@ -121,9 +120,6 @@ pipeline {
                         script: 'git log -1 --pretty=%B',
                         returnStdout: true
                     ).trim()
-
-                    // 重新计算 IMAGE_TAG（格式：v20260304）
-                    env.IMAGE_TAG = "v${new Date().format('yyyyMMdd')}"
 
                     echo "已拉取分支: ${params.GIT_BRANCH}"
                     echo "提交信息: ${env.GIT_COMMIT_MSG}"
