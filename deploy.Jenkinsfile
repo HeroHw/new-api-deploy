@@ -43,37 +43,6 @@ pipeline {
             defaultValue: '',
             description: 'CI 构建编号（由 Build Job 传递）'
         )
-
-        // 部署模式选择
-        choice(
-            name: 'DEPLOY_MODE',
-            choices: ['canary', 'blue-green', 'direct'],
-            description: '部署模式: canary=灰度发布, blue-green=蓝绿切换, direct=直接切换'
-        )
-
-        // 灰度发布配置
-        string(
-            name: 'CANARY_PERCENTAGE',
-            defaultValue: '10,30,50,100',
-            description: '灰度流量比例阶梯 (逗号分隔)'
-        )
-        string(
-            name: 'CANARY_WAIT_TIME',
-            defaultValue: '60',
-            description: '每个灰度阶梯等待时间(秒)'
-        )
-        booleanParam(
-            name: 'AUTO_PROMOTE',
-            defaultValue: true,
-            description: '灰度验证通过后自动提升到100%'
-        )
-
-        // 回滚选项
-        booleanParam(
-            name: 'IS_ROLLBACK',
-            defaultValue: false,
-            description: '是否为回滚操作'
-        )
     }
 
     stages {
@@ -98,8 +67,6 @@ pipeline {
                     }
 
                     echo "✅ IMAGE_TAG 校验通过: ${params.IMAGE_TAG}"
-                    echo "部署模式: ${params.DEPLOY_MODE}"
-                    echo "是否回滚: ${params.IS_ROLLBACK}"
                 }
             }
         }
@@ -293,79 +260,37 @@ ENDSSH
                     }
 
                     if (!healthy) {
-                        error("❌ 健康检查失败，已重试 ${maxRetries} 次")
-                    }
-                }
-            }
-        }
+                        echo "❌ ${env.TARGET_ENV} 环境健康检查失败，准备回滚..."
 
-        stage('灰度发布') {
-            when {
-                expression {
-                    params.DEPLOY_MODE == 'canary' &&
-                    env.CURRENT_ENV != 'none' &&
-                    !params.IS_ROLLBACK
-                }
-            }
-            steps {
-                script {
-                    echo "========== 灰度发布 =========="
-
-                    def canarySteps = params.CANARY_PERCENTAGE.split(',').collect { it.trim().toInteger() }
-                    def waitTime = params.CANARY_WAIT_TIME.toInteger()
-
-                    echo "开始灰度发布，流量阶梯: ${canarySteps}"
-
-                    for (int i = 0; i < canarySteps.size(); i++) {
-                        def percentage = canarySteps[i]
-
-                        // 跳过最后的 100%，留给流量切换阶段
-                        if (percentage == 100 && !params.AUTO_PROMOTE) {
-                            echo "灰度流量已达 ${canarySteps[i-1]}%，等待手动确认提升到 100%..."
-                            input message: "确认提升到 100%?", ok: "确认"
-                        }
-
-                        if (percentage < 100) {
-                            echo "正在设置灰度流量为 ${percentage}%"
+                        // 如果不是首次部署，启动旧服务并回滚
+                        if (env.CURRENT_ENV != 'none') {
+                            echo "正在启动旧服务 ${env.CURRENT_ENV}..."
 
                             try {
                                 sshagent([SSH_CREDENTIALS_ID]) {
                                     sh """
-                                        ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} \
-                                        '${DEPLOY_PATH}/scripts/set-canary-weight.sh ${env.CURRENT_ENV} ${env.TARGET_ENV} ${percentage}'
+                                        ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
+                                            cd ${DEPLOY_PATH}
+
+                                            # 启动旧环境容器
+                                            docker compose up -d app-${env.CURRENT_ENV}
+
+                                            # 等待旧服务启动
+                                            sleep 10
+
+                                            echo "✅ 旧服务 ${env.CURRENT_ENV} 已启动"
+ENDSSH
                                     """
                                 }
+
+                                echo "旧服务已恢复，将在 post failure 阶段执行流量回滚"
                             } catch (Exception e) {
-                                error("❌ 设置灰度流量失败: ${e.message}")
+                                echo "⚠️ 启动旧服务失败: ${e.message}"
                             }
-
-                            // 等待并监控
-                            echo "等待 ${waitTime} 秒并监控指标..."
-                            sleep(time: waitTime, unit: 'SECONDS')
-
-                            // 验证灰度环境健康状态
-                            def healthCheck
-                            sshagent([SSH_CREDENTIALS_ID]) {
-                                healthCheck = sh(
-                                    script: """
-                                        ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} \
-                                        '${DEPLOY_PATH}/scripts/check-canary-health.sh ${env.TARGET_ENV}'
-                                    """,
-                                    returnStatus: true
-                                )
-                            }
-
-                            if (healthCheck != 0) {
-                                echo "❌ 灰度健康检查在 ${percentage}% 时失败! 正在回滚..."
-                                rollbackTraffic()
-                                error("灰度发布在 ${percentage}% 时失败")
-                            }
-
-                            echo "✅ 灰度 ${percentage}% - 健康检查通过"
                         }
-                    }
 
-                    echo "✅ 灰度发布成功，准备全量切换"
+                        error("❌ 健康检查失败，已重试 ${maxRetries} 次")
+                    }
                 }
             }
         }
@@ -380,7 +305,7 @@ ENDSSH
                         sshagent([SSH_CREDENTIALS_ID]) {
                             sh """
                                 ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
-                                    # 使用切换脚本 (100% 流量)
+                                    # 使用切换脚本
                                     ${DEPLOY_PATH}/scripts/switch-traffic.sh ${env.TARGET_ENV}
 
                                     # 记录当前活跃环境
@@ -436,9 +361,6 @@ def rollbackTraffic() {
             sshagent([SSH_CREDENTIALS_ID]) {
                 sh """
                     ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
-                        # 重置灰度流量
-                        ${DEPLOY_PATH}/scripts/set-canary-weight.sh ${env.CURRENT_ENV} ${env.TARGET_ENV} 0 2>/dev/null || true
-
                         # 切换回原环境
                         ${DEPLOY_PATH}/scripts/switch-traffic.sh ${env.CURRENT_ENV}
 
@@ -469,7 +391,6 @@ def sendFeishuNotification(String status, String title) {
         .replace('"', '\\"')
         .replace('\n', '\\n')
         .replace('\r', '')
-    def deployMode = params.DEPLOY_MODE ?: 'N/A'
     def buildNumberFromCI = params.BUILD_NUMBER_FROM_CI ?: 'N/A'
 
     def color = (status == 'success') ? 'green' : 'red'
@@ -528,13 +449,6 @@ def sendFeishuNotification(String status, String title) {
                             "text": {
                                 "tag": "lark_md",
                                 "content": "**提交信息:**\\n${commitMsg}"
-                            }
-                        },
-                        {
-                            "is_short": true,
-                            "text": {
-                                "tag": "lark_md",
-                                "content": "**部署模式:**\\n${deployMode}"
                             }
                         },
                         {

@@ -20,11 +20,7 @@ CONTAINER_GREEN=${CONTAINER_GREEN:-app-green}
 CONTAINER_HAPROXY=${CONTAINER_HAPROXY:-haproxy}
 
 TARGET_ENV=${1:-}
-HAPROXY_SOCKET="/tmp/admin.sock"
 HAPROXY_CONFIG_DIR="${DEPLOY_DIR}"
-
-# backend 名称前缀 (与 haproxy.cfg 中保持一致)
-BACKEND_PREFIX="newapi"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -42,6 +38,27 @@ log_warn() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# 停止旧环境容器
+stop_old_container() {
+    local env=$1
+    local container
+
+    if [[ "$env" == "blue" ]]; then
+        container="${CONTAINER_BLUE}"
+    else
+        container="${CONTAINER_GREEN}"
+    fi
+
+    log_info "正在停止 ${env} 环境容器 (${container})..."
+
+    if docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
+        docker stop ${container}
+        log_info "${env} 环境容器已停止"
+    else
+        log_warn "${env} 环境容器未运行，跳过停止操作"
+    fi
 }
 
 # 验证参数
@@ -95,132 +112,44 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_HAPROXY}$"; then
     exit 1
 fi
 
-# 使用 HAProxy Runtime API 切换流量
-switch_via_runtime_api() {
-    log_info "通过 HAProxy Runtime API 切换流量..."
+# 切换流量（修改配置文件并重载）
+log_info "正在切换流量到 ${TARGET_ENV}..."
 
-    # 启用目标服务器
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server ${BACKEND_PREFIX}_backend/${TARGET_ENV} state ready' | socat stdio ${HAPROXY_SOCKET}"
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server ${BACKEND_PREFIX}_backend/${TARGET_ENV} weight 100' | socat stdio ${HAPROXY_SOCKET}"
+temp_file="${HAPROXY_CONFIG_DIR}/haproxy.cfg.tmp"
+blue_container="${CONTAINER_BLUE}"
+green_container="${CONTAINER_GREEN}"
 
-    # 禁用源服务器
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server ${BACKEND_PREFIX}_backend/${SOURCE_ENV} weight 0' | socat stdio ${HAPROXY_SOCKET}"
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server ${BACKEND_PREFIX}_backend/${SOURCE_ENV} state maint' | socat stdio ${HAPROXY_SOCKET}"
-
-    log_info "通过 Runtime API 切换成功"
-}
-
-# 持久化配置到文件（不重启，仅更新文件）
-persist_config_to_file() {
-    log_info "持久化配置到文件..."
-
-    local temp_file="${HAPROXY_CONFIG_DIR}/haproxy.cfg.tmp"
-    local blue_container="${CONTAINER_BLUE}"
-    local green_container="${CONTAINER_GREEN}"
-
-    # 修改配置文件 - 使用宽松匹配，兼容灰度发布后的任意权重状态
-    if [[ "$TARGET_ENV" == "blue" ]]; then
-        sed -e "s/server blue ${blue_container}:3000.*/server blue ${blue_container}:3000 check inter 5s fall 3 rise 2 weight 100 init-addr last,libc,none/" \
-            -e "s/server green ${green_container}:3000.*/server green ${green_container}:3000 check inter 5s fall 3 rise 2 weight 0 disabled init-addr last,libc,none/" \
-            "${HAPROXY_CONFIG_DIR}/haproxy.cfg" > "$temp_file"
-    else
-        sed -e "s/server green ${green_container}:3000.*/server green ${green_container}:3000 check inter 5s fall 3 rise 2 weight 100 init-addr last,libc,none/" \
-            -e "s/server blue ${blue_container}:3000.*/server blue ${blue_container}:3000 check inter 5s fall 3 rise 2 weight 0 disabled init-addr last,libc,none/" \
-            "${HAPROXY_CONFIG_DIR}/haproxy.cfg" > "$temp_file"
-    fi
-
-    mv "$temp_file" "${HAPROXY_CONFIG_DIR}/haproxy.cfg"
-
-    # 验证配置文件语法
-    log_info "验证配置文件语法..."
-    if ! docker exec ${CONTAINER_HAPROXY} haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg 2>/dev/null; then
-        log_warn "配置文件语法验证失败，但 Runtime API 已生效"
-    else
-        log_info "配置文件已持久化"
-    fi
-}
-
-# 备选方案：通过重新加载配置切换
-switch_via_config_reload() {
-    log_info "通过配置重载切换流量..."
-
-    local temp_file="${HAPROXY_CONFIG_DIR}/haproxy.cfg.tmp"
-    local blue_container="${CONTAINER_BLUE}"
-    local green_container="${CONTAINER_GREEN}"
-
-    # 修改配置文件 - 使用宽松匹配，兼容灰度发布后的任意权重状态
-    if [[ "$TARGET_ENV" == "blue" ]]; then
-        sed -e "s/server blue ${blue_container}:3000.*/server blue ${blue_container}:3000 check inter 5s fall 3 rise 2 weight 100/" \
-            -e "s/server green ${green_container}:3000.*/server green ${green_container}:3000 check inter 5s fall 3 rise 2 weight 0 disabled/" \
-            "${HAPROXY_CONFIG_DIR}/haproxy.cfg" > "$temp_file"
-    else
-        sed -e "s/server green ${green_container}:3000.*/server green ${green_container}:3000 check inter 5s fall 3 rise 2 weight 100/" \
-            -e "s/server blue ${blue_container}:3000.*/server blue ${blue_container}:3000 check inter 5s fall 3 rise 2 weight 0 disabled/" \
-            "${HAPROXY_CONFIG_DIR}/haproxy.cfg" > "$temp_file"
-    fi
-
-    mv "$temp_file" "${HAPROXY_CONFIG_DIR}/haproxy.cfg"
-
-    # 验证配置文件语法
-    log_info "验证配置文件语法..."
-    if ! docker exec ${CONTAINER_HAPROXY} haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg; then
-        log_error "配置文件语法错误，中止切换"
-        exit 1
-    fi
-
-    # 重新加载 HAProxy 配置（使用 graceful reload，无中断）
-    log_info "重新加载 HAProxy 配置..."
-    docker exec ${CONTAINER_HAPROXY} kill -USR2 1
-
-    # 等待配置生效
-    sleep 2
-    log_info "配置已通过 graceful reload 重新加载"
-
-    # 验证配置是否生效
-    log_info "验证配置是否生效..."
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'show servers state ${BACKEND_PREFIX}_backend' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
-
-    log_info "通过配置重载切换成功"
-}
-
-# 尝试使用 Runtime API，失败则使用配置重载
-if docker exec ${CONTAINER_HAPROXY} test -S ${HAPROXY_SOCKET} 2>/dev/null; then
-    # 优先使用 Runtime API（平滑切换，无中断）
-    switch_via_runtime_api
-    # 同时持久化配置到文件（容器重启后保持）
-    persist_config_to_file
+# 修改配置文件
+if [[ "$TARGET_ENV" == "blue" ]]; then
+    sed -e "s/server blue ${blue_container}:3000.*/server blue ${blue_container}:3000 check inter 5s fall 3 rise 2 weight 100 init-addr last,libc,none/" \
+        -e "s/server green ${green_container}:3000.*/server green ${green_container}:3000 check inter 5s fall 3 rise 2 weight 0 disabled init-addr last,libc,none/" \
+        "${HAPROXY_CONFIG_DIR}/haproxy.cfg" > "$temp_file"
 else
-    log_warn "HAProxy socket 不可用，使用配置重载方式"
-    switch_via_config_reload
+    sed -e "s/server green ${green_container}:3000.*/server green ${green_container}:3000 check inter 5s fall 3 rise 2 weight 100 init-addr last,libc,none/" \
+        -e "s/server blue ${blue_container}:3000.*/server blue ${blue_container}:3000 check inter 5s fall 3 rise 2 weight 0 disabled init-addr last,libc,none/" \
+        "${HAPROXY_CONFIG_DIR}/haproxy.cfg" > "$temp_file"
 fi
+
+mv "$temp_file" "${HAPROXY_CONFIG_DIR}/haproxy.cfg"
+
+# 验证配置文件语法
+log_info "验证配置文件语法..."
+if ! docker exec ${CONTAINER_HAPROXY} haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg; then
+    log_error "配置文件语法错误，中止切换"
+    exit 1
+fi
+
+# 重新加载 HAProxy 配置（graceful reload，无中断）
+log_info "重新加载 HAProxy 配置..."
+docker exec ${CONTAINER_HAPROXY} kill -USR2 1
+
+# 等待配置生效
+sleep 2
+log_info "配置已重新加载"
 
 # 验证切换结果
 log_info "正在验证切换结果..."
 sleep 2
-
-# 检查 HAProxy stats
-docker exec ${CONTAINER_HAPROXY} sh -c "echo 'show servers state' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
-
-# 停止旧环境容器
-stop_old_container() {
-    local env=$1
-    local container
-
-    if [[ "$env" == "blue" ]]; then
-        container="${CONTAINER_BLUE}"
-    else
-        container="${CONTAINER_GREEN}"
-    fi
-
-    log_info "正在停止 ${env} 环境容器 (${container})..."
-
-    if docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
-        docker stop ${container}
-        log_info "${env} 环境容器已停止"
-    else
-        log_warn "${env} 环境容器未运行，跳过停止操作"
-    fi
-}
 
 # 停止源环境（旧版本）
 stop_old_container "$SOURCE_ENV"
@@ -228,14 +157,4 @@ stop_old_container "$SOURCE_ENV"
 log_info "流量切换完成，${TARGET_ENV} 环境已激活"
 
 # 记录切换历史
-echo "$(date '+%Y-%m-%d %H:%M:%S') - 从 ${SOURCE_ENV} 切换到 ${TARGET_ENV} (100%)" >> "${DEPLOY_DIR}/switch-history.log"
-
-# 更新灰度后端指向下次部署的目标环境
-update_canary_backend() {
-    log_info "更新灰度后端指向 ${SOURCE_ENV} (下次部署目标)..."
-
-    local target_container="app-${SOURCE_ENV}"
-    docker exec ${HAPROXY_CONTAINER} sh -c "echo 'set server ${BACKEND_PREFIX}_canary/canary addr ${target_container} port 3000' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
-}
-
-update_canary_backend 2>/dev/null || true
+echo "$(date '+%Y-%m-%d %H:%M:%S') - 从 ${SOURCE_ENV} 切换到 ${TARGET_ENV}" >> "${DEPLOY_DIR}/switch-history.log"
