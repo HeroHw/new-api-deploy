@@ -164,9 +164,26 @@ log_info "Runtime API 切换成功（零中断）"
 log_info "重启 HAProxy 以刷新 DNS 解析..."
 docker restart ${CONTAINER_HAPROXY}
 
-# 等待 HAProxy 重启完成
-log_info "等待 HAProxy 重启..."
-sleep 5
+# 等待 HAProxy 重启完成并验证 Runtime API 可用
+log_info "等待 HAProxy 重启完成..."
+for i in {1..20}; do
+    if docker exec ${CONTAINER_HAPROXY} test -S ${HAPROXY_SOCKET} 2>/dev/null; then
+        # Socket 存在，测试是否可用
+        if docker exec ${CONTAINER_HAPROXY} sh -c "echo 'show info' | socat stdio ${HAPROXY_SOCKET}" >/dev/null 2>&1; then
+            log_info "✅ HAProxy Runtime API 已就绪"
+            break
+        fi
+    fi
+
+    if [ $i -eq 20 ]; then
+        log_error "HAProxy 重启超时，Runtime API 不可用"
+        docker logs ${CONTAINER_HAPROXY} 2>&1 | tail -20
+        exit 1
+    fi
+
+    log_info "等待 Runtime API 就绪... ($i/20)"
+    sleep 1
+done
 
 # 重启后重新应用流量配置
 log_info "重新应用流量配置..."
