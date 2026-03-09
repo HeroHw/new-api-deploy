@@ -160,6 +160,47 @@ fi
 
 log_info "Runtime API 切换成功（零中断）"
 
+# 检查 DNS 解析状态
+log_info "检查 DNS 解析状态..."
+SERVER_STATE=$(docker exec ${CONTAINER_HAPROXY} sh -c "echo 'show servers state' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null | grep "newapi_backend.*${TARGET_ENV}" || true)
+
+if echo "$SERVER_STATE" | grep -q -- "-" | head -1 | awk '{print $4}' | grep -q "^-$"; then
+    log_warn "检测到 DNS 解析问题，正在重启 HAProxy 以重新解析..."
+    docker restart ${CONTAINER_HAPROXY}
+
+    # 等待 HAProxy 重启完成
+    log_info "等待 HAProxy 重启..."
+    sleep 8
+
+    # 验证 socket 可用
+    for i in {1..10}; do
+        if docker exec ${CONTAINER_HAPROXY} test -S ${HAPROXY_SOCKET} 2>/dev/null; then
+            log_info "✅ HAProxy 已重启"
+            break
+        fi
+        if [ $i -eq 10 ]; then
+            log_error "HAProxy 重启后 socket 不可用"
+            exit 1
+        fi
+        sleep 1
+    done
+
+    # 重启后重新应用流量配置
+    log_info "重新应用流量配置..."
+    if [[ "$TARGET_ENV" == "blue" ]]; then
+        docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/blue state ready' | socat stdio ${HAPROXY_SOCKET}"
+        docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/blue weight 100' | socat stdio ${HAPROXY_SOCKET}"
+        docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/green weight 0' | socat stdio ${HAPROXY_SOCKET}"
+        docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/green state maint' | socat stdio ${HAPROXY_SOCKET}"
+    else
+        docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/green state ready' | socat stdio ${HAPROXY_SOCKET}"
+        docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/green weight 100' | socat stdio ${HAPROXY_SOCKET}"
+        docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/blue weight 0' | socat stdio ${HAPROXY_SOCKET}"
+        docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/blue state maint' | socat stdio ${HAPROXY_SOCKET}"
+    fi
+    log_info "✅ DNS 解析问题已修复"
+fi
+
 # 验证切换结果
 log_info "正在验证切换结果..."
 sleep 2
