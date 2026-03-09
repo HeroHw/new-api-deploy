@@ -9,7 +9,6 @@ services:
       - deploy-network
     ports:
       - "${HAPROXY_HTTP_PORT:-80}:80"
-      - "${HAPROXY_STATS_PORT:-8404}:8404"
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg
       - haproxy-socket:/run/haproxy
