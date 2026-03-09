@@ -82,21 +82,21 @@ docker exec ${CONTAINER_HAPROXY:-haproxy} ls -la /tmp/admin.sock 2>&1 || log_war
 log_info "检查 HAProxy 进程..."
 docker exec ${CONTAINER_HAPROXY:-haproxy} ps aux | grep haproxy || true
 
-# 等待 socket 创建（最多 20 秒）
-for i in {1..20}; do
+# 等待 socket 创建（最多 30 秒）
+for i in {1..30}; do
     if docker exec ${CONTAINER_HAPROXY:-haproxy} test -S /tmp/admin.sock 2>/dev/null; then
         log_info "✅ Runtime API socket 可用"
         break
     fi
 
-    if [ $i -eq 20 ]; then
+    if [ $i -eq 30 ]; then
         log_error "❌ Runtime API socket 不可用"
         log_error "HAProxy 日志："
         docker logs ${CONTAINER_HAPROXY:-haproxy} 2>&1 | tail -20
         exit 1
     fi
 
-    log_info "等待 socket 创建... ($i/20)"
+    log_info "等待 socket 创建... ($i/30)"
     sleep 1
 done
 

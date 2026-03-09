@@ -166,7 +166,7 @@ docker restart ${CONTAINER_HAPROXY}
 
 # 等待 HAProxy 重启完成并验证 Runtime API 可用
 log_info "等待 HAProxy 重启完成..."
-for i in {1..20}; do
+for i in {1..30}; do
     if docker exec ${CONTAINER_HAPROXY} test -S ${HAPROXY_SOCKET} 2>/dev/null; then
         # Socket 存在，测试是否可用
         if docker exec ${CONTAINER_HAPROXY} sh -c "echo 'show info' | socat stdio ${HAPROXY_SOCKET}" >/dev/null 2>&1; then
@@ -175,13 +175,13 @@ for i in {1..20}; do
         fi
     fi
 
-    if [ $i -eq 20 ]; then
+    if [ $i -eq 30 ]; then
         log_error "HAProxy 重启超时，Runtime API 不可用"
         docker logs ${CONTAINER_HAPROXY} 2>&1 | tail -20
         exit 1
     fi
 
-    log_info "等待 Runtime API 就绪... ($i/20)"
+    log_info "等待 Runtime API 就绪... ($i/30)"
     sleep 1
 done
 
