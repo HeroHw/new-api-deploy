@@ -160,25 +160,6 @@ fi
 
 log_info "Runtime API 切换成功（零中断）"
 
-# 持久化配置到文件（容器重启后保持）
-log_info "持久化配置到文件..."
-
-blue_container="${CONTAINER_BLUE}"
-green_container="${CONTAINER_GREEN}"
-
-# 直接修改配置文件（使用 -i 保持 inode 不变，容器能看到更新）
-if [[ "$TARGET_ENV" == "blue" ]]; then
-    sed -i -e "s/server blue ${blue_container}:3000.*/server blue ${blue_container}:3000 check inter 5s fall 3 rise 2 weight 100 init-addr last,libc,none/" \
-        -e "s/server green ${green_container}:3000.*/server green ${green_container}:3000 check inter 5s fall 3 rise 2 weight 0 disabled init-addr last,libc,none/" \
-        "${HAPROXY_CONFIG_DIR}/haproxy.cfg"
-else
-    sed -i -e "s/server green ${green_container}:3000.*/server green ${green_container}:3000 check inter 5s fall 3 rise 2 weight 100 init-addr last,libc,none/" \
-        -e "s/server blue ${blue_container}:3000.*/server blue ${blue_container}:3000 check inter 5s fall 3 rise 2 weight 0 disabled init-addr last,libc,none/" \
-        "${HAPROXY_CONFIG_DIR}/haproxy.cfg"
-fi
-
-log_info "配置文件已持久化"
-
 # 验证切换结果
 log_info "正在验证切换结果..."
 sleep 2

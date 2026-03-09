@@ -109,6 +109,35 @@ else
     exit 1
 fi
 
+# 步骤 7: 恢复上次的流量状态
+log_info "步骤 7: 恢复上次的流量状态..."
+
+ACTIVE_ENV_FILE="${DEPLOY_DIR}/.active_env"
+if [ -f "$ACTIVE_ENV_FILE" ]; then
+    ACTIVE_ENV=$(cat "$ACTIVE_ENV_FILE")
+    log_info "检测到上次活跃环境: ${ACTIVE_ENV}"
+
+    if [[ "$ACTIVE_ENV" == "green" ]]; then
+        log_info "恢复流量到 green 环境..."
+        docker exec ${CONTAINER_HAPROXY:-haproxy} sh -c "echo 'set server newapi_backend/green state ready' | socat stdio /tmp/admin.sock" >/dev/null 2>&1
+        docker exec ${CONTAINER_HAPROXY:-haproxy} sh -c "echo 'set server newapi_backend/green weight 100' | socat stdio /tmp/admin.sock" >/dev/null 2>&1
+        docker exec ${CONTAINER_HAPROXY:-haproxy} sh -c "echo 'set server newapi_backend/blue weight 0' | socat stdio /tmp/admin.sock" >/dev/null 2>&1
+        docker exec ${CONTAINER_HAPROXY:-haproxy} sh -c "echo 'set server newapi_backend/blue state maint' | socat stdio /tmp/admin.sock" >/dev/null 2>&1
+        log_info "✅ 流量已恢复到 green 环境"
+    elif [[ "$ACTIVE_ENV" == "blue" ]]; then
+        log_info "恢复流量到 blue 环境..."
+        docker exec ${CONTAINER_HAPROXY:-haproxy} sh -c "echo 'set server newapi_backend/blue state ready' | socat stdio /tmp/admin.sock" >/dev/null 2>&1
+        docker exec ${CONTAINER_HAPROXY:-haproxy} sh -c "echo 'set server newapi_backend/blue weight 100' | socat stdio /tmp/admin.sock" >/dev/null 2>&1
+        docker exec ${CONTAINER_HAPROXY:-haproxy} sh -c "echo 'set server newapi_backend/green weight 0' | socat stdio /tmp/admin.sock" >/dev/null 2>&1
+        docker exec ${CONTAINER_HAPROXY:-haproxy} sh -c "echo 'set server newapi_backend/green state maint' | socat stdio /tmp/admin.sock" >/dev/null 2>&1
+        log_info "✅ 流量已恢复到 blue 环境"
+    else
+        log_info "使用默认配置（blue 环境）"
+    fi
+else
+    log_info "未找到 .active_env 文件，使用默认配置（blue 环境）"
+fi
+
 log_info "✅ HAProxy 初始化完成，Runtime API 已就绪"
 log_info ""
 log_info "现在可以使用零中断的蓝绿部署了！"
