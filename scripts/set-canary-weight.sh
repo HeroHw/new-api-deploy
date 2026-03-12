@@ -25,8 +25,6 @@ CONTAINER_GREEN=${CONTAINER_GREEN:-app-green}
 CONTAINER_HAPROXY=${CONTAINER_HAPROXY:-haproxy}
 
 HAPROXY_SOCKET="/tmp/admin.sock"
-HAPROXY_CONFIG_DIR="${DEPLOY_DIR}"
-
 # backend 名称前缀 (与 haproxy.cfg 中保持一致)
 BACKEND_PREFIX="newapi"
 
@@ -76,6 +74,11 @@ log_info "设置流量分配: ${CURRENT_ENV}=${CURRENT_WEIGHT}%, ${TARGET_ENV}=$
 set_weight_via_api() {
     log_info "通过 HAProxy Runtime API 配置..."
 
+    if ! docker exec ${CONTAINER_HAPROXY} test -S ${HAPROXY_SOCKET} 2>/dev/null; then
+        log_error "HAProxy Runtime API socket 不可用"
+        exit 1
+    fi
+
     # 确保两个服务器都是 ready 状态
     docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server ${BACKEND_PREFIX}_backend/${CURRENT_ENV} state ready' | socat stdio ${HAPROXY_SOCKET}"
     docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server ${BACKEND_PREFIX}_backend/${TARGET_ENV} state ready' | socat stdio ${HAPROXY_SOCKET}"
@@ -87,39 +90,7 @@ set_weight_via_api() {
     log_info "权重配置成功"
 }
 
-# 备选方案：通过配置文件
-set_weight_via_config() {
-    log_info "通过配置重载方式配置..."
-
-    local temp_file="${HAPROXY_CONFIG_DIR}/haproxy.cfg.tmp"
-    local blue_container="${CONTAINER_BLUE}"
-    local green_container="${CONTAINER_GREEN}"
-
-    # 使用 sed 更新权重
-    sed -e "s/server ${CURRENT_ENV} ${blue_container}:3000.* weight [0-9]*/server ${CURRENT_ENV} ${blue_container}:3000 check inter 5s fall 3 rise 2 weight ${CURRENT_WEIGHT}/" \
-        -e "s/server ${TARGET_ENV} ${green_container}:3000.* weight [0-9]*/server ${TARGET_ENV} ${green_container}:3000 check inter 5s fall 3 rise 2 weight ${TARGET_WEIGHT}/" \
-        "${HAPROXY_CONFIG_DIR}/haproxy.cfg" > "$temp_file"
-
-    # 移除 disabled 标记（如果存在）
-    sed -i 's/ disabled$//' "$temp_file"
-
-    mv "$temp_file" "${HAPROXY_CONFIG_DIR}/haproxy.cfg"
-
-    # 重新加载 HAProxy
-    docker exec ${CONTAINER_HAPROXY} haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg && \
-    docker exec ${CONTAINER_HAPROXY} kill -USR2 1
-
-    log_info "配置重载成功"
-}
-
-# 尝试使用 Runtime API
-# if docker exec ${CONTAINER_HAPROXY} test -S ${HAPROXY_SOCKET} 2>/dev/null; then
-#     set_weight_via_api
-# else
-#     log_warn "HAProxy socket 不可用，使用配置重载方式"
-#     set_weight_via_config
-# fi
-set_weight_via_config
+set_weight_via_api
 
 # 验证配置
 log_info "正在验证配置..."

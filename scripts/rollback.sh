@@ -59,11 +59,8 @@ if ! docker exec ${TARGET_CONTAINER} curl -sf "http://localhost:3000/api/status"
     exit 1
 fi
 
-# 执行切换
+# 执行切换（switch-traffic.sh 内部已更新 .active_env）
 ./scripts/switch-traffic.sh "$TARGET_ENV"
-
-# 更新活跃环境记录
-echo "$TARGET_ENV" > .active_env
 
 log_info "回滚完成! ${TARGET_ENV} 环境已激活"
 log_info "原环境 (${CURRENT_ENV}) 仍在运行，可用于调试"

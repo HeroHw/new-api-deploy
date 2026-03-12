@@ -168,5 +168,8 @@ fi
 
 log_info "✅ 流量切换完成，${TARGET_ENV} 环境已激活"
 
+# 更新活跃环境记录
+echo "${TARGET_ENV}" > "${DEPLOY_DIR}/.active_env"
+
 # 记录切换历史
 echo "$(date '+%Y-%m-%d %H:%M:%S') - 从 ${SOURCE_ENV} 切换到 ${TARGET_ENV}" >> "${DEPLOY_DIR}/switch-history.log"
