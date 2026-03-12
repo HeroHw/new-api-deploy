@@ -118,22 +118,6 @@ log_step "创建数据和日志目录..."
 mkdir -p data-blue data-green logs-blue logs-green
 log_ok "目录已就绪"
 
-# ─── 生成 HAProxy 配置 ────────────────────────────────────────────────────────
-
-log_step "生成 HAProxy 配置（初始激活环境: blue）..."
-
-ACTIVE_ENV=blue bash "${SCRIPT_DIR}/generate-haproxy-config.sh"
-echo "blue" > .active_env
-
-log_ok "haproxy.cfg 已生成"
-
-# ─── 构建 HAProxy 镜像 ────────────────────────────────────────────────────────
-
-log_step "构建 HAProxy 镜像（含 socat）..."
-
-docker compose -f docker-compose-haproxy.yml build --quiet
-log_ok "HAProxy 镜像构建完成"
-
 # ─── 拉取应用镜像 ─────────────────────────────────────────────────────────────
 
 log_step "拉取应用镜像..."
@@ -176,6 +160,22 @@ for i in {1..60}; do
     fi
     sleep 1
 done
+
+# ─── 生成 HAProxy 配置 ────────────────────────────────────────────────────────
+
+log_step "生成 HAProxy 配置（初始激活环境: blue）..."
+
+ACTIVE_ENV=blue bash "${SCRIPT_DIR}/generate-haproxy-config.sh"
+echo "blue" > .active_env
+
+log_ok "haproxy.cfg 已生成"
+
+# ─── 构建 HAProxy 镜像 ────────────────────────────────────────────────────────
+
+log_step "构建 HAProxy 镜像（含 socat）..."
+
+docker compose -f docker-compose-haproxy.yml build --quiet
+log_ok "HAProxy 镜像构建完成"
 
 # ─── 启动 HAProxy ─────────────────────────────────────────────────────────────
 
