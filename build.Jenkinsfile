@@ -41,6 +41,13 @@ pipeline {
             description: '手动指定镜像标签（仅在 deploy_only 模式下生效，格式: v20260304）'
         )
 
+        // 是否同时标记为 latest
+        booleanParam(
+            name: 'TAG_AS_LATEST',
+            defaultValue: false,
+            description: '是否同时将镜像标记为 latest 并推送（仅在 build_and_deploy 模式下生效）'
+        )
+
         // 多选部署服务
         booleanParam(
             name: 'DEPLOY_TO_TEST_BACKEND',
@@ -138,14 +145,18 @@ pipeline {
                     echo "正在构建 Docker 镜像: ${ACR_REGISTRY}/${APP_NAME}:${IMAGE_TAG}"
 
                     try {
-                        sh """
+                        def buildCmd = """
                             docker build \
                                 --build-arg BUILD_DATE=\$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
                                 --build-arg VCS_REF=${env.GIT_COMMIT} \
                                 --build-arg VERSION=${env.IMAGE_TAG} \
-                                -t ${ACR_REGISTRY}/${APP_NAME}:${IMAGE_TAG} \
-                                .
+                                -t ${ACR_REGISTRY}/${APP_NAME}:${IMAGE_TAG}
                         """
+                        if (params.TAG_AS_LATEST) {
+                            buildCmd += " -t ${ACR_REGISTRY}/${APP_NAME}:latest"
+                        }
+                        buildCmd += " ."
+                        sh buildCmd
                     } catch (Exception e) {
                         error("Docker 镜像构建失败: ${e.message}")
                     }
@@ -166,6 +177,13 @@ pipeline {
                             echo "${ACR_CREDENTIALS_PSW}" | docker login "${ACR_REGISTRY}" -u "${ACR_CREDENTIALS_USR}" --password-stdin
                             docker push "${ACR_REGISTRY}/${APP_NAME}:${IMAGE_TAG}"
                         """
+
+                        if (params.TAG_AS_LATEST) {
+                            sh """
+                                docker push "${ACR_REGISTRY}/${APP_NAME}:latest"
+                            """
+                            echo "✅ latest 标签推送成功"
+                        }
 
                         // 验证镜像已成功推送
                         def manifestCheck = sh(
