@@ -13,7 +13,7 @@ cd "$DEPLOY_DIR"
 
 # 加载 .env 文件
 if [ -f ".env" ]; then
-    export $(grep -v '^#' .env | xargs)
+    set -a; source .env; set +a
 fi
 
 # 设置默认值

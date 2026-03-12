@@ -26,7 +26,7 @@ log_error() {
 # 加载 .env 文件
 if [ -f "${DEPLOY_DIR}/.env" ]; then
     log_info "加载配置文件: ${DEPLOY_DIR}/.env"
-    export $(grep -v '^#' "${DEPLOY_DIR}/.env" | xargs)
+    set -a; source "${DEPLOY_DIR}/.env"; set +a
 else
     log_error ".env 文件不存在，请先创建配置文件"
     log_error "可以复制 .env.example 并修改: cp .env.example .env"

@@ -30,7 +30,7 @@ log_error() {
 
 # 加载 .env 文件
 if [ -f .env ]; then
-    export $(grep -v '^#' .env | xargs)
+    set -a; source .env; set +a
 else
     log_error ".env 文件不存在，请先创建配置文件"
     exit 1

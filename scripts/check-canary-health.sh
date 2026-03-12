@@ -15,7 +15,7 @@ DEPLOY_DIR="$(dirname "$SCRIPT_DIR")"
 
 # 加载 .env 文件
 if [ -f "${DEPLOY_DIR}/.env" ]; then
-    export $(grep -v '^#' "${DEPLOY_DIR}/.env" | xargs)
+    set -a; source "${DEPLOY_DIR}/.env"; set +a
 fi
 
 TARGET_ENV=${1:-}
