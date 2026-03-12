@@ -154,7 +154,8 @@ log_ok "镜像拉取完成"
 log_step "启动 Blue 应用容器..."
 
 # 仅启动 blue，green 在首次部署时再启动
-docker compose up -d "${CONTAINER_BLUE}"
+# 注意：docker compose 使用服务名（docker-compose.yml 中的 key），不是容器名
+docker compose up -d app-blue
 
 # 等待 blue 健康
 log_info "等待 Blue 容器健康检查通过..."
