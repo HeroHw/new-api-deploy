@@ -20,7 +20,6 @@ CONTAINER_GREEN=${CONTAINER_GREEN:-app-green}
 CONTAINER_HAPROXY=${CONTAINER_HAPROXY:-haproxy}
 
 TARGET_ENV=${1:-}
-HAPROXY_CONFIG_DIR="${DEPLOY_DIR}"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -38,27 +37,6 @@ log_warn() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# 停止旧环境容器
-stop_old_container() {
-    local env=$1
-    local container
-
-    if [[ "$env" == "blue" ]]; then
-        container="${CONTAINER_BLUE}"
-    else
-        container="${CONTAINER_GREEN}"
-    fi
-
-    log_info "正在停止 ${env} 环境容器 (${container})..."
-
-    if docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
-        docker stop ${container}
-        log_info "${env} 环境容器已停止"
-    else
-        log_warn "${env} 环境容器未运行，跳过停止操作"
-    fi
 }
 
 # 验证参数
@@ -85,7 +63,6 @@ log_info "正在将流量从 ${SOURCE_ENV} 切换到 ${TARGET_ENV}"
 check_health() {
     local env=$1
     local container
-
     if [[ "$env" == "blue" ]]; then
         container="${CONTAINER_BLUE}"
     else
@@ -112,9 +89,6 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_HAPROXY}$"; then
     exit 1
 fi
 
-# 切换流量（使用 Runtime API，零中断）
-log_info "正在切换流量到 ${TARGET_ENV}..."
-
 HAPROXY_SOCKET="/tmp/admin.sock"
 
 # 检查 socat 是否可用
@@ -129,54 +103,47 @@ if ! docker exec ${CONTAINER_HAPROXY} test -S ${HAPROXY_SOCKET} 2>/dev/null; the
     exit 1
 fi
 
-# 使用 Runtime API 切换流量
-log_info "通过 Runtime API 切换流量（零中断）..."
+# 步骤 1: 通过 Runtime API 立即切换流量（零中断）
+log_info "步骤 1/3: 通过 Runtime API 立即切换流量..."
 
-if [[ "$TARGET_ENV" == "blue" ]]; then
-    # 切换到 blue
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/blue state ready' | socat stdio ${HAPROXY_SOCKET}"
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/blue weight 100' | socat stdio ${HAPROXY_SOCKET}"
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/green weight 0' | socat stdio ${HAPROXY_SOCKET}"
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/green state maint' | socat stdio ${HAPROXY_SOCKET}"
+apply_runtime_config() {
+    local active=$1
+    local inactive
+    if [[ "$active" == "blue" ]]; then
+        inactive="green"
+    else
+        inactive="blue"
+    fi
 
-    # 同时更新测试后端
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_blue/blue state ready' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_blue/blue weight 100' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_green/green weight 0' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_green/green state maint' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
-else
-    # 切换到 green
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/green state ready' | socat stdio ${HAPROXY_SOCKET}"
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/green weight 100' | socat stdio ${HAPROXY_SOCKET}"
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/blue weight 0' | socat stdio ${HAPROXY_SOCKET}"
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/blue state maint' | socat stdio ${HAPROXY_SOCKET}"
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/${active} state ready' | socat stdio ${HAPROXY_SOCKET}"
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/${active} weight 100' | socat stdio ${HAPROXY_SOCKET}"
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/${inactive} weight 0' | socat stdio ${HAPROXY_SOCKET}"
+    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/${inactive} state maint' | socat stdio ${HAPROXY_SOCKET}"
+}
 
-    # 同时更新测试后端
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_green/green state ready' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_green/green weight 100' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_blue/blue weight 0' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_blue/blue state maint' | socat stdio ${HAPROXY_SOCKET}" 2>/dev/null || true
-fi
+apply_runtime_config "$TARGET_ENV"
+log_info "Runtime API 切换完成，流量已切换到 ${TARGET_ENV}"
 
-log_info "Runtime API 切换成功（零中断）"
+# 步骤 2: 更新磁盘上的 haproxy.cfg（持久化，防止重启回滚）
+log_info "步骤 2/3: 更新 haproxy.cfg 配置文件..."
+ACTIVE_ENV="${TARGET_ENV}" bash "${SCRIPT_DIR}/generate-haproxy-config.sh"
 
-# 重启 HAProxy 以刷新 DNS 解析
-log_info "重启 HAProxy 以刷新 DNS 解析..."
-docker restart ${CONTAINER_HAPROXY}
+# 步骤 3: 优雅重载（刷新 DNS 解析 + 加载新配置，零中断）
+log_info "步骤 3/3: 优雅重载 HAProxy（刷新 DNS 解析）..."
+docker kill -s HUP ${CONTAINER_HAPROXY}
 
-# 等待 HAProxy 重启完成并验证 Runtime API 可用
-log_info "等待 HAProxy 重启完成..."
+# 等待重载完成并验证 Runtime API 可用
+log_info "等待 HAProxy 重载完成..."
 for i in {1..30}; do
     if docker exec ${CONTAINER_HAPROXY} test -S ${HAPROXY_SOCKET} 2>/dev/null; then
-        # Socket 存在，测试是否可用
         if docker exec ${CONTAINER_HAPROXY} sh -c "echo 'show info' | socat stdio ${HAPROXY_SOCKET}" >/dev/null 2>&1; then
-            log_info "✅ HAProxy Runtime API 已就绪"
+            log_info "✅ HAProxy 重载完成，Runtime API 已就绪"
             break
         fi
     fi
 
     if [ $i -eq 30 ]; then
-        log_error "HAProxy 重启超时，Runtime API 不可用"
+        log_error "HAProxy 重载超时，Runtime API 不可用"
         docker logs ${CONTAINER_HAPROXY} 2>&1 | tail -20
         exit 1
     fi
@@ -185,30 +152,21 @@ for i in {1..30}; do
     sleep 1
 done
 
-# 重启后重新应用流量配置
-log_info "重新应用流量配置..."
-if [[ "$TARGET_ENV" == "blue" ]]; then
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/blue state ready' | socat stdio ${HAPROXY_SOCKET}"
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/blue weight 100' | socat stdio ${HAPROXY_SOCKET}"
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/green weight 0' | socat stdio ${HAPROXY_SOCKET}"
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/green state maint' | socat stdio ${HAPROXY_SOCKET}"
-else
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/green state ready' | socat stdio ${HAPROXY_SOCKET}"
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/green weight 100' | socat stdio ${HAPROXY_SOCKET}"
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/blue weight 0' | socat stdio ${HAPROXY_SOCKET}"
-    docker exec ${CONTAINER_HAPROXY} sh -c "echo 'set server newapi_backend/blue state maint' | socat stdio ${HAPROXY_SOCKET}"
+# 停止旧环境容器
+log_info "正在停止 ${SOURCE_ENV} 环境容器..."
+SOURCE_CONTAINER="${CONTAINER_BLUE}"
+if [[ "$SOURCE_ENV" == "green" ]]; then
+    SOURCE_CONTAINER="${CONTAINER_GREEN}"
 fi
 
-log_info "✅ HAProxy 已重启并重新配置"
+if docker ps --format '{{.Names}}' | grep -q "^${SOURCE_CONTAINER}$"; then
+    docker stop ${SOURCE_CONTAINER}
+    log_info "${SOURCE_ENV} 环境容器已停止"
+else
+    log_warn "${SOURCE_ENV} 环境容器未运行，跳过停止操作"
+fi
 
-# 验证切换结果
-log_info "正在验证切换结果..."
-sleep 2
-
-# 停止源环境（旧版本）
-stop_old_container "$SOURCE_ENV"
-
-log_info "流量切换完成，${TARGET_ENV} 环境已激活"
+log_info "✅ 流量切换完成，${TARGET_ENV} 环境已激活"
 
 # 记录切换历史
 echo "$(date '+%Y-%m-%d %H:%M:%S') - 从 ${SOURCE_ENV} 切换到 ${TARGET_ENV}" >> "${DEPLOY_DIR}/switch-history.log"

@@ -36,10 +36,25 @@ fi
 # 设置默认值
 CONTAINER_BLUE=${CONTAINER_BLUE:-app-blue}
 CONTAINER_GREEN=${CONTAINER_GREEN:-app-green}
+ACTIVE_ENV=${ACTIVE_ENV:-blue}
+
+if [[ "$ACTIVE_ENV" != "blue" && "$ACTIVE_ENV" != "green" ]]; then
+    log_error "无效的 ACTIVE_ENV: ${ACTIVE_ENV}，必须是 'blue' 或 'green'"
+    exit 1
+fi
+
+if [[ "$ACTIVE_ENV" == "blue" ]]; then
+    BLUE_STATUS="weight 100"
+    GREEN_STATUS="weight 0 disabled"
+else
+    BLUE_STATUS="weight 0 disabled"
+    GREEN_STATUS="weight 100"
+fi
 
 log_info "容器配置:"
 log_info "  Blue 容器: ${CONTAINER_BLUE}"
 log_info "  Green 容器: ${CONTAINER_GREEN}"
+log_info "  激活环境: ${ACTIVE_ENV}"
 
 # 检查模板文件
 if [ ! -f "${HAPROXY_DIR}/haproxy.cfg.template" ]; then
@@ -48,9 +63,12 @@ if [ ! -f "${HAPROXY_DIR}/haproxy.cfg.template" ]; then
 fi
 
 # 生成配置文件
-log_info "生成 HAProxy 配置文件..."
+log_info "生成 HAProxy 配置文件（激活环境: ${ACTIVE_ENV}）..."
 sed -e "s/{{CONTAINER_BLUE}}/${CONTAINER_BLUE}/g" \
     -e "s/{{CONTAINER_GREEN}}/${CONTAINER_GREEN}/g" \
+    -e "s/{{ACTIVE_ENV}}/${ACTIVE_ENV}/g" \
+    -e "s|{{BLUE_STATUS}}|${BLUE_STATUS}|g" \
+    -e "s|{{GREEN_STATUS}}|${GREEN_STATUS}|g" \
     "${HAPROXY_DIR}/haproxy.cfg.template" > "${HAPROXY_DIR}/haproxy.cfg"
 
 log_info "配置文件已生成: ${HAPROXY_DIR}/haproxy.cfg"
