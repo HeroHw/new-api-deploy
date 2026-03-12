@@ -68,10 +68,11 @@ if [[ ! -f ".env" ]]; then
 fi
 
 # 加载环境变量
-set -a
-# shellcheck disable=SC1091
-source .env
-set +a
+while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] && export "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+    done < .env
 
 # 校验必填项
 MISSING=()

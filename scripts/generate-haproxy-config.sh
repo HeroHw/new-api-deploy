@@ -26,7 +26,11 @@ log_error() {
 # 加载 .env 文件
 if [ -f "${DEPLOY_DIR}/.env" ]; then
     log_info "加载配置文件: ${DEPLOY_DIR}/.env"
-    set -a; source "${DEPLOY_DIR}/.env"; set +a
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] && export "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+    done < "${DEPLOY_DIR}/.env"
 else
     log_error ".env 文件不存在，请先创建配置文件"
     log_error "可以复制 .env.example 并修改: cp .env.example .env"

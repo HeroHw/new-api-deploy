@@ -12,7 +12,11 @@ DEPLOY_DIR="$(dirname "$SCRIPT_DIR")"
 
 # 加载 .env 文件
 if [ -f "${DEPLOY_DIR}/.env" ]; then
-    set -a; source "${DEPLOY_DIR}/.env"; set +a
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] && export "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+    done < "${DEPLOY_DIR}/.env"
 fi
 
 CURRENT_ENV=${1:-}

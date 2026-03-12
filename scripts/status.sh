@@ -13,7 +13,11 @@ cd "$DEPLOY_DIR"
 
 # 加载 .env 文件
 if [ -f ".env" ]; then
-    set -a; source .env; set +a
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] && export "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+    done < .env
 fi
 
 # 设置默认值
