@@ -151,7 +151,7 @@ pipeline {
                                 --build-arg VCS_REF=${env.GIT_COMMIT} \
                                 --build-arg VERSION=${env.IMAGE_TAG} \
                                 -t ${ACR_REGISTRY}/${APP_NAME}:${IMAGE_TAG}
-                        """
+                        """.trim()
                         if (params.TAG_AS_LATEST) {
                             buildCmd += " -t ${ACR_REGISTRY}/${APP_NAME}:latest"
                         }
