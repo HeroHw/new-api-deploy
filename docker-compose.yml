@@ -7,9 +7,6 @@ services:
       - deploy-network
     expose:
       - "3000"
-    volumes:
-      - ./data-blue:/data
-      - ./logs-blue:/app/logs
     environment:
       - APP_COLOR=blue
     healthcheck:
@@ -30,9 +27,6 @@ services:
       - deploy-network
     expose:
       - "3000"
-    volumes:
-      - ./data-green:/data
-      - ./logs-green:/app/logs
     environment:
       - APP_COLOR=green
     healthcheck:
