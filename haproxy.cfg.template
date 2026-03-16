@@ -25,6 +25,7 @@ listen stats
 # 主前端 - 接收所有流量
 frontend newapi_front
     bind *:80
+    option forwardfor
 
     # 通过 header 路由到特定环境进行测试
     acl is_blue_test hdr(X-Target-Env) -i blue
@@ -46,7 +47,7 @@ frontend newapi_front
 backend newapi_backend
     balance roundrobin
     option httpchk GET /api/status
-    http-check expect status 200
+    http-check expect rstatus 200|429
 
     # 通过 weight 控制流量比例，{{ACTIVE_ENV}} 为当前激活环境
     server blue {{CONTAINER_BLUE}}:3000 check inter 5s fall 3 rise 2 {{BLUE_STATUS}} init-addr last,libc,none
@@ -55,17 +56,17 @@ backend newapi_backend
 # 灰度后端 - 始终指向新版本环境
 backend newapi_canary
     option httpchk GET /api/status
-    http-check expect status 200
+    http-check expect rstatus 200|429
     server canary {{CONTAINER_GREEN}}:3000 check init-addr last,libc,none
 
 # Blue 后端 (直接测试用，仅 blue 为激活环境时可用)
 backend newapi_blue
     option httpchk GET /api/status
-    http-check expect status 200
+    http-check expect rstatus 200|429
     server blue {{CONTAINER_BLUE}}:3000 check inter 5s fall 3 rise 2 {{BLUE_STATUS}} init-addr last,libc,none
 
 # Green 后端 (直接测试用，仅 green 为激活环境时可用)
 backend newapi_green
     option httpchk GET /api/status
-    http-check expect status 200
+    http-check expect rstatus 200|429
     server green {{CONTAINER_GREEN}}:3000 check inter 5s fall 3 rise 2 {{GREEN_STATUS}} init-addr last,libc,none
