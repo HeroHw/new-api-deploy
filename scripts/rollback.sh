@@ -10,7 +10,6 @@
 #   4. 通过 HAProxy Runtime API 无中断切换流量
 #   5. 更新 haproxy.cfg 并 reload
 #   6. 更新 .active_env 记录
-#   注: 不停止原容器，保留双活状态供再次回滚使用
 #
 
 set -e
@@ -139,6 +138,22 @@ for i in {1..30}; do
     sleep 1
 done
 
+# ─── 停止旧容器 ───────────────────────────────────────────────────────────────
+log_step "停止旧容器 (${ACTIVE_ENV})..."
+
+if [[ "$ACTIVE_ENV" == "blue" ]]; then
+    OLD_CONTAINER="${CONTAINER_BLUE}"
+else
+    OLD_CONTAINER="${CONTAINER_GREEN}"
+fi
+
+if docker ps --format '{{.Names}}' | grep -q "^${OLD_CONTAINER}$"; then
+    docker stop "${OLD_CONTAINER}"
+    log_ok "${ACTIVE_ENV} 容器已停止"
+else
+    log_warn "${ACTIVE_ENV} 容器未运行，跳过"
+fi
+
 # ─── 更新状态记录 ─────────────────────────────────────────────────────────────
 echo "${TARGET_ENV}" > .active_env
 echo "$(date '+%Y-%m-%d %H:%M:%S') - [ROLLBACK] 从 ${ACTIVE_ENV} 回滚到 ${TARGET_ENV}" >> switch-history.log
@@ -150,7 +165,6 @@ echo -e "${BOLD}${GREEN}   回滚完成！${NC}"
 echo -e "${BOLD}${GREEN}========================================${NC}"
 echo ""
 echo -e "  当前活跃环境: ${BOLD}${TARGET_ENV}${NC}"
-echo -e "  原环境 (${ACTIVE_ENV}) 仍在运行，可再次回滚"
 echo ""
 echo -e "  查看状态: bash scripts/status.sh"
 echo ""
