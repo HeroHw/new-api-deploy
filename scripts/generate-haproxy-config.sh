@@ -41,6 +41,9 @@ fi
 CONTAINER_BLUE=${CONTAINER_BLUE:-app-blue}
 CONTAINER_GREEN=${CONTAINER_GREEN:-app-green}
 ACTIVE_ENV=${ACTIVE_ENV:-blue}
+HAPROXY_TIMEOUT_CONNECT=${HAPROXY_TIMEOUT_CONNECT:-5000}
+HAPROXY_TIMEOUT_CLIENT=${HAPROXY_TIMEOUT_CLIENT:-50000}
+HAPROXY_TIMEOUT_SERVER=${HAPROXY_TIMEOUT_SERVER:-50000}
 
 if [[ "$ACTIVE_ENV" != "blue" && "$ACTIVE_ENV" != "green" ]]; then
     log_error "无效的 ACTIVE_ENV: ${ACTIVE_ENV}，必须是 'blue' 或 'green'"
@@ -59,6 +62,7 @@ log_info "容器配置:"
 log_info "  Blue 容器: ${CONTAINER_BLUE}"
 log_info "  Green 容器: ${CONTAINER_GREEN}"
 log_info "  激活环境: ${ACTIVE_ENV}"
+log_info "  超时配置: connect=${HAPROXY_TIMEOUT_CONNECT}ms client=${HAPROXY_TIMEOUT_CLIENT}ms server=${HAPROXY_TIMEOUT_SERVER}ms"
 
 # 检查模板文件
 if [ ! -f "${HAPROXY_DIR}/haproxy.cfg.template" ]; then
@@ -68,12 +72,9 @@ fi
 
 # 生成配置文件
 log_info "生成 HAProxy 配置文件（激活环境: ${ACTIVE_ENV}）..."
-sed -e "s/{{CONTAINER_BLUE}}/${CONTAINER_BLUE}/g" \
-    -e "s/{{CONTAINER_GREEN}}/${CONTAINER_GREEN}/g" \
-    -e "s/{{ACTIVE_ENV}}/${ACTIVE_ENV}/g" \
-    -e "s|{{BLUE_STATUS}}|${BLUE_STATUS}|g" \
-    -e "s|{{GREEN_STATUS}}|${GREEN_STATUS}|g" \
-    "${HAPROXY_DIR}/haproxy.cfg.template" > "${HAPROXY_DIR}/haproxy.cfg"
+export CONTAINER_BLUE CONTAINER_GREEN ACTIVE_ENV BLUE_STATUS GREEN_STATUS \
+       HAPROXY_TIMEOUT_CONNECT HAPROXY_TIMEOUT_CLIENT HAPROXY_TIMEOUT_SERVER
+envsubst < "${HAPROXY_DIR}/haproxy.cfg.template" > "${HAPROXY_DIR}/haproxy.cfg"
 
 log_info "配置文件已生成: ${HAPROXY_DIR}/haproxy.cfg"
 

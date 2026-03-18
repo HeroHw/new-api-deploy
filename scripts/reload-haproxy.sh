@@ -54,7 +54,7 @@ log_info "容器 ${CONTAINER_HAPROXY} 运行中"
 
 log_step "验证配置文件语法..."
 
-if ! docker exec "${CONTAINER_HAPROXY}" haproxy -c -f "${CFG_PATH}" 2>&1; then
+if ! docker exec "${CONTAINER_HAPROXY}" haproxy -c -dM -f "${CFG_PATH}" 2>&1; then
     log_error "配置文件语法错误，热重载已取消"
     exit 1
 fi
