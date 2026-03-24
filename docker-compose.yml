@@ -6,6 +6,9 @@ services:
       - deploy-network
     ports:
       - "${APP_PORT:-3000}:3000"
+    volumes:
+      - ./data:/data
+      - ./logs:/app/logs
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/api/status"]
       interval: 10s
