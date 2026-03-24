@@ -1,5 +1,5 @@
 // ============================================
-// Deploy Job - 蓝绿部署 + 灰度发布 + 自动回滚
+// Deploy Job - 单服务部署
 // ============================================
 pipeline {
     agent any
@@ -22,7 +22,6 @@ pipeline {
     }
 
     parameters {
-        // IMAGE_TAG 参数（只读，由 Build Job 传递）
         string(
             name: 'IMAGE_TAG',
             defaultValue: '',
@@ -51,17 +50,14 @@ pipeline {
                 script {
                     echo "========== 参数校验 =========="
 
-                    // 校验 IMAGE_TAG 是否为空
                     if (!params.IMAGE_TAG || params.IMAGE_TAG.trim() == '') {
                         error("❌ IMAGE_TAG 参数为空！此参数必须由 Build Job 自动传递，禁止手动触发此 Job。")
                     }
 
-                    // 校验 IMAGE_TAG 格式（防止用户手动输入 latest 等不安全标签）
                     if (params.IMAGE_TAG == 'latest' || params.IMAGE_TAG == 'stable') {
                         error("❌ 禁止使用 'latest' 或 'stable' 作为镜像标签！请使用具体版本号。")
                     }
 
-                    // 校验镜像标签格式（必须符合：v20260304）
                     if (!params.IMAGE_TAG.matches(/^v\d{8}$/)) {
                         error("❌ IMAGE_TAG 格式不正确！期望格式: v20260304")
                     }
@@ -101,47 +97,11 @@ pipeline {
             }
         }
 
-        stage('确定目标环境') {
+        stage('部署服务') {
             steps {
                 script {
-                    echo "========== 确定目标环境 =========="
-
-                    // 获取当前活跃环境
-                    def currentEnv
-                    sshagent([SSH_CREDENTIALS_ID]) {
-                        currentEnv = sh(
-                            script: """
-                                ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} \
-                                'cat ${DEPLOY_PATH}/.active_env 2>/dev/null || echo none'
-                            """,
-                            returnStdout: true
-                        ).trim()
-                    }
-
-                    env.CURRENT_ENV = currentEnv
-
-                    // 确定目标环境
-                    if (currentEnv == 'none') {
-                        env.TARGET_ENV = 'blue'
-                        echo "首次部署，目标环境: blue"
-                    } else {
-                        env.TARGET_ENV = (currentEnv == 'blue') ? 'green' : 'blue'
-                        echo "当前活跃环境: ${env.CURRENT_ENV}"
-                        echo "部署目标环境: ${env.TARGET_ENV}"
-                    }
-                }
-            }
-        }
-
-        stage('部署到目标环境') {
-            steps {
-                script {
-                    echo "========== 部署到目标环境 =========="
-
-                    def fullImage = "${ACR_REGISTRY}/${APP_NAME}:${params.IMAGE_TAG}"
-                    def targetEnv = env.TARGET_ENV
-
-                    echo "正在部署 ${params.IMAGE_TAG} 到 ${targetEnv} 环境"
+                    echo "========== 部署服务 =========="
+                    echo "正在部署镜像: ${ACR_REGISTRY}/${APP_NAME}:${params.IMAGE_TAG}"
 
                     try {
                         sshagent([SSH_CREDENTIALS_ID]) {
@@ -149,53 +109,25 @@ pipeline {
                                 ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
                                     cd ${DEPLOY_PATH}
 
-                                    # 加载 .env 文件
-                                    if [ -f .env ]; then
-                                        export \$(grep -v '^#' .env | xargs)
-                                    fi
-                                    CONTAINER_BLUE=\${CONTAINER_BLUE:-app-blue}
-                                    CONTAINER_GREEN=\${CONTAINER_GREEN:-app-green}
-
-                                    # 确保脚本有执行权限
-                                    chmod +x ${DEPLOY_PATH}/scripts/*.sh 2>/dev/null || true
-
                                     # 登录 ACR
                                     echo '${ACR_CREDENTIALS_PSW}' | docker login ${ACR_REGISTRY} -u ${ACR_CREDENTIALS_USR} --password-stdin
 
-                                    # 拉取新镜像
-                                    docker pull ${fullImage}
-
-                                    # 设置环境变量
-                                    if [ "${targetEnv}" = "blue" ]; then
-                                        export BLUE_TAG="${params.IMAGE_TAG}"
-                                        export GREEN_TAG=\$(docker inspect \$CONTAINER_GREEN --format='{{.Config.Image}}' 2>/dev/null | awk -F: '{print \$NF}' | tr -d '[:space:]')
-                                        export GREEN_TAG=\${GREEN_TAG:-${params.IMAGE_TAG}}
-                                        OTHER_CONTAINER="\$CONTAINER_GREEN"
+                                    # 更新 .env 中的 IMAGE_TAG
+                                    if grep -q "^IMAGE_TAG=" .env; then
+                                        sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${params.IMAGE_TAG}|" .env
                                     else
-                                        export GREEN_TAG="${params.IMAGE_TAG}"
-                                        export BLUE_TAG=\$(docker inspect \$CONTAINER_BLUE --format='{{.Config.Image}}' 2>/dev/null | awk -F: '{print \$NF}' | tr -d '[:space:]')
-                                        export BLUE_TAG=\${BLUE_TAG:-${params.IMAGE_TAG}}
-                                        OTHER_CONTAINER="\$CONTAINER_BLUE"
+                                        echo "IMAGE_TAG=${params.IMAGE_TAG}" >> .env
                                     fi
 
                                     export ACR_REGISTRY="${ACR_REGISTRY}"
                                     export APP_NAME="${APP_NAME}"
+                                    export IMAGE_TAG="${params.IMAGE_TAG}"
 
-                                    # 部署逻辑
-                                    if [ "${env.CURRENT_ENV}" = "none" ]; then
-                                        echo "首次部署，启动 blue 和 green 两个环境"
-                                        export BLUE_TAG="${params.IMAGE_TAG}"
-                                        export GREEN_TAG="${params.IMAGE_TAG}"
-                                        docker compose up -d app-blue app-green
-                                    elif ! docker ps -a --format '{{.Names}}' | grep -q "^\${OTHER_CONTAINER}\$"; then
-                                        echo "另一个环境容器不存在，同时启动两个环境"
-                                        docker compose up -d app-blue app-green
-                                    else
-                                        echo "更新目标环境 ${targetEnv}"
-                                        docker compose up -d --no-deps --force-recreate app-${targetEnv}
-                                    fi
+                                    # 拉取新镜像并重启服务
+                                    docker compose pull app
+                                    docker compose up -d --force-recreate app
 
-                                    echo "✅ 已部署到 ${targetEnv}"
+                                    echo "✅ 服务已更新，镜像: ${params.IMAGE_TAG}"
 ENDSSH
                             """
                         }
@@ -215,7 +147,7 @@ ENDSSH
                     def retryCount = 0
                     def healthy = false
 
-                    echo "正在等待 ${env.TARGET_ENV} 环境启动..."
+                    echo "正在等待服务启动..."
 
                     while (retryCount < maxRetries && !healthy) {
                         try {
@@ -228,16 +160,8 @@ ENDSSH
                                             if [ -f .env ]; then
                                                 export \$(grep -v '^#' .env | xargs)
                                             fi
-                                            CONTAINER_BLUE=\${CONTAINER_BLUE:-app-blue}
-                                            CONTAINER_GREEN=\${CONTAINER_GREEN:-app-green}
-
-                                            if [ "${env.TARGET_ENV}" = "blue" ]; then
-                                                TARGET_CONTAINER="\$CONTAINER_BLUE"
-                                            else
-                                                TARGET_CONTAINER="\$CONTAINER_GREEN"
-                                            fi
-
-                                            docker exec \$TARGET_CONTAINER curl -sf http://localhost:3000/api/status
+                                            CONTAINER_NAME=\${CONTAINER_NAME:-app}
+                                            docker exec \$CONTAINER_NAME curl -sf http://localhost:3000/api/status
 ENDSSH
                                     """,
                                     returnStatus: true
@@ -246,7 +170,7 @@ ENDSSH
 
                             if (response == 0) {
                                 healthy = true
-                                echo "✅ ${env.TARGET_ENV} 环境健康检查通过!"
+                                echo "✅ 健康检查通过!"
                             }
                         } catch (Exception e) {
                             // 忽略异常，继续重试
@@ -260,63 +184,7 @@ ENDSSH
                     }
 
                     if (!healthy) {
-                        echo "❌ ${env.TARGET_ENV} 环境健康检查失败，准备回滚..."
-
-                        // 如果不是首次部署，启动旧服务并回滚
-                        if (env.CURRENT_ENV != 'none') {
-                            echo "正在启动旧服务 ${env.CURRENT_ENV}..."
-
-                            try {
-                                sshagent([SSH_CREDENTIALS_ID]) {
-                                    sh """
-                                        ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
-                                            cd ${DEPLOY_PATH}
-
-                                            # 启动旧环境容器
-                                            docker compose up -d app-${env.CURRENT_ENV}
-
-                                            # 等待旧服务启动
-                                            sleep 10
-
-                                            echo "✅ 旧服务 ${env.CURRENT_ENV} 已启动"
-ENDSSH
-                                    """
-                                }
-
-                                echo "旧服务已恢复，将在 post failure 阶段执行流量回滚"
-                            } catch (Exception e) {
-                                echo "⚠️ 启动旧服务失败: ${e.message}"
-                            }
-                        }
-
-                        error("❌ 健康检查失败，已重试 ${maxRetries} 次")
-                    }
-                }
-            }
-        }
-
-        stage('流量切换') {
-            steps {
-                script {
-                    echo "========== 流量切换 =========="
-                    echo "正在将流量从 ${env.CURRENT_ENV} 切换到 ${env.TARGET_ENV}"
-
-                    try {
-                        sshagent([SSH_CREDENTIALS_ID]) {
-                            sh """
-                                ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
-                                    # 使用切换脚本
-                                    ${DEPLOY_PATH}/scripts/switch-traffic.sh ${env.TARGET_ENV}
-
-                                    # 记录当前活跃环境
-                                    echo "${env.TARGET_ENV}" > ${DEPLOY_PATH}/.active_env
-
-                                    echo "✅ 流量已切换到 ${env.TARGET_ENV}"
-ENDSSH
-                            """
-                        }
-                    } catch (Exception e) {
-                        error("❌ 流量切换失败: ${e.message}")
+                        error("❌ 健康检查失败，已重试 ${maxRetries} 次，请手动检查服务状态")
                     }
                 }
             }
@@ -326,15 +194,14 @@ ENDSSH
     post {
         success {
             script {
-                echo "✅ 部署成功! ${env.TARGET_ENV} 环境已激活，版本: ${params.IMAGE_TAG}"
+                echo "✅ 部署成功! 版本: ${params.IMAGE_TAG}"
                 sendFeishuNotification('success', '部署成功')
             }
         }
 
         failure {
             script {
-                echo "❌ 部署失败! 正在回滚..."
-                rollbackTraffic()
+                echo "❌ 部署失败!"
                 sendFeishuNotification('failure', '部署失败')
             }
         }
@@ -351,40 +218,10 @@ ENDSSH
 }
 
 // ============================================
-// 函数：回滚流量
-// ============================================
-def rollbackTraffic() {
-    if (env.CURRENT_ENV && env.TARGET_ENV && env.CURRENT_ENV != 'none') {
-        try {
-            echo "正在回滚流量到 ${env.CURRENT_ENV}..."
-
-            sshagent([SSH_CREDENTIALS_ID]) {
-                sh """
-                    ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
-                        # 切换回原环境
-                        ${DEPLOY_PATH}/scripts/switch-traffic.sh ${env.CURRENT_ENV}
-
-                        # 恢复活跃环境标记
-                        echo "${env.CURRENT_ENV}" > ${DEPLOY_PATH}/.active_env
-
-                        echo "✅ 已回滚到 ${env.CURRENT_ENV}"
-ENDSSH
-                """
-            }
-        } catch (Exception e) {
-            echo "⚠️ 回滚失败: ${e.message}"
-        }
-    } else {
-        echo "⚠️ 无法回滚：当前环境信息不完整"
-    }
-}
-
-// ============================================
 // 函数：发送飞书通知
 // ============================================
 def sendFeishuNotification(String status, String title) {
     def projectName = env.PROJECT_NAME ?: env.APP_NAME ?: 'N/A'
-    def deployEnv = env.TARGET_ENV ?: 'N/A'
     def imageTag = params.IMAGE_TAG ?: 'N/A'
     def commitMsg = (params.GIT_COMMIT_MSG ?: 'N/A')
         .replace('\\', '\\\\')
@@ -398,8 +235,6 @@ def sendFeishuNotification(String status, String title) {
     def buttonType = (status == 'success') ? 'default' : 'danger'
     def buttonText = (status == 'success') ? '查看部署详情' : '查看失败日志'
     def buttonUrl = (status == 'success') ? env.BUILD_URL : "${env.BUILD_URL}console"
-
-    def statusText = (status == 'success') ? '部署成功' : "部署失败，已自动回滚到 ${env.CURRENT_ENV}"
 
     def message = """
     {
@@ -434,13 +269,6 @@ def sendFeishuNotification(String status, String title) {
                             "is_short": true,
                             "text": {
                                 "tag": "lark_md",
-                                "content": "**部署环境:**\\n${deployEnv}"
-                            }
-                        },
-                        {
-                            "is_short": true,
-                            "text": {
-                                "tag": "lark_md",
                                 "content": "**镜像版本:**\\n${imageTag}"
                             }
                         },
@@ -456,13 +284,6 @@ def sendFeishuNotification(String status, String title) {
                             "text": {
                                 "tag": "lark_md",
                                 "content": "**部署时长:**\\n${currentBuild.durationString.replace(' and counting', '')}"
-                            }
-                        },
-                        {
-                            "is_short": false,
-                            "text": {
-                                "tag": "lark_md",
-                                "content": "**状态:**\\n${statusText}"
                             }
                         }
                     ]

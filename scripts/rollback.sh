@@ -1,15 +1,8 @@
 #!/bin/bash
 #
-# 快速回滚到上一版本
-# 用法: ./scripts/rollback.sh
-#
-# 逻辑:
-#   1. 确定当前活跃环境（active），回滚目标为另一个（target）
-#   2. 若 target 容器未运行，先 docker compose up 拉起
-#   3. 等待 target 健康
-#   4. 通过 HAProxy Runtime API 无中断切换流量
-#   5. 更新 haproxy.cfg 并 reload
-#   6. 更新 .active_env 记录
+# 回滚到指定镜像版本
+# 用法: ./scripts/rollback.sh <image_tag>
+# 例如: ./scripts/rollback.sh v20260301
 #
 
 set -e
@@ -33,6 +26,14 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step()  { echo -e "\n${BOLD}${BLUE}▶ $1${NC}"; }
 log_ok()    { echo -e "${GREEN}✅ $1${NC}"; }
 
+TARGET_TAG=${1:-}
+
+if [[ -z "$TARGET_TAG" ]]; then
+    log_error "用法: $0 <image_tag>"
+    log_error "示例: $0 v20260301"
+    exit 1
+fi
+
 # ─── 加载 .env ────────────────────────────────────────────────────────────────
 if [[ -f ".env" ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -42,60 +43,52 @@ if [[ -f ".env" ]]; then
     done < .env
 fi
 
-CONTAINER_BLUE=${CONTAINER_BLUE:-app-blue}
-CONTAINER_GREEN=${CONTAINER_GREEN:-app-green}
-CONTAINER_HAPROXY=${CONTAINER_HAPROXY:-haproxy}
-HAPROXY_SOCKET="/tmp/admin.sock"
+CONTAINER_NAME=${CONTAINER_NAME:-app}
+CURRENT_TAG=${IMAGE_TAG:-unknown}
 
-# ─── 确定回滚方向 ─────────────────────────────────────────────────────────────
-ACTIVE_ENV=$(cat .active_env 2>/dev/null || echo "blue")
+log_step "回滚: ${CURRENT_TAG} → ${TARGET_TAG}"
 
-if [[ "$ACTIVE_ENV" == "blue" ]]; then
-    TARGET_ENV="green"
-    TARGET_CONTAINER="${CONTAINER_GREEN}"
-    TARGET_SERVICE="app-green"
+# ─── 更新 .env 中的 IMAGE_TAG ─────────────────────────────────────────────────
+log_step "更新 IMAGE_TAG..."
+
+if grep -q "^IMAGE_TAG=" .env; then
+    sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${TARGET_TAG}|" .env
 else
-    TARGET_ENV="blue"
-    TARGET_CONTAINER="${CONTAINER_BLUE}"
-    TARGET_SERVICE="app-blue"
+    echo "IMAGE_TAG=${TARGET_TAG}" >> .env
 fi
 
-log_step "回滚方向: ${ACTIVE_ENV} → ${TARGET_ENV}"
+export IMAGE_TAG="${TARGET_TAG}"
+log_ok "IMAGE_TAG 已更新为 ${TARGET_TAG}"
 
-# ─── 检查 HAProxy ─────────────────────────────────────────────────────────────
-if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_HAPROXY}$"; then
-    log_error "HAProxy 容器未运行，无法回滚"
+# ─── 拉取目标镜像 ─────────────────────────────────────────────────────────────
+log_step "拉取目标镜像..."
+
+if ! docker compose pull app; then
+    log_error "镜像拉取失败，请确认镜像标签是否正确: ${ACR_REGISTRY}/${APP_NAME}:${TARGET_TAG}"
+    # 恢复原来的 TAG
+    sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${CURRENT_TAG}|" .env
     exit 1
 fi
 
-if ! docker exec "${CONTAINER_HAPROXY}" test -S "${HAPROXY_SOCKET}" 2>/dev/null; then
-    log_error "HAProxy Runtime API socket 不可用"
-    exit 1
-fi
+log_ok "镜像拉取完成"
 
-# ─── 拉起目标容器（如果未运行）────────────────────────────────────────────────
-log_step "检查目标容器状态..."
+# ─── 重启服务 ─────────────────────────────────────────────────────────────────
+log_step "重启服务..."
 
-if ! docker ps --format '{{.Names}}' | grep -q "^${TARGET_CONTAINER}$"; then
-    log_warn "${TARGET_ENV} 容器未运行，正在启动..."
-    docker compose up -d "${TARGET_SERVICE}"
-    log_info "${TARGET_ENV} 容器已启动，等待就绪..."
-else
-    log_info "${TARGET_ENV} 容器已在运行"
-fi
+docker compose up -d --force-recreate app
 
-# ─── 等待目标容器健康 ─────────────────────────────────────────────────────────
-log_step "等待 ${TARGET_ENV} 容器健康检查通过（最多 60s）..."
+# ─── 等待健康 ─────────────────────────────────────────────────────────────────
+log_step "等待服务健康检查（最多 60s）..."
 
 for i in {1..60}; do
-    if docker exec "${TARGET_CONTAINER}" curl -sf "http://localhost:3000/api/status" &>/dev/null; then
-        log_ok "${TARGET_ENV} 容器已就绪"
+    if docker exec "${CONTAINER_NAME}" curl -sf "http://localhost:3000/api/status" &>/dev/null; then
+        log_ok "服务已就绪"
         break
     fi
 
     if [[ $i -eq 60 ]]; then
-        log_error "${TARGET_ENV} 容器启动超时，查看日志："
-        docker logs "${TARGET_CONTAINER}" 2>&1 | tail -20
+        log_error "服务启动超时，查看日志："
+        docker logs "${CONTAINER_NAME}" 2>&1 | tail -20
         exit 1
     fi
 
@@ -105,66 +98,13 @@ for i in {1..60}; do
     sleep 1
 done
 
-# ─── 通过 Runtime API 切换流量（零中断）──────────────────────────────────────
-log_step "步骤 1/3: 通过 HAProxy Runtime API 切换流量..."
-
-docker exec "${CONTAINER_HAPROXY}" sh -c "echo 'set server newapi_backend/${TARGET_ENV} state ready'  | socat stdio ${HAPROXY_SOCKET}"
-docker exec "${CONTAINER_HAPROXY}" sh -c "echo 'set server newapi_backend/${TARGET_ENV} weight 100'   | socat stdio ${HAPROXY_SOCKET}"
-docker exec "${CONTAINER_HAPROXY}" sh -c "echo 'set server newapi_backend/${ACTIVE_ENV} weight 0'    | socat stdio ${HAPROXY_SOCKET}"
-docker exec "${CONTAINER_HAPROXY}" sh -c "echo 'set server newapi_backend/${ACTIVE_ENV} state maint' | socat stdio ${HAPROXY_SOCKET}"
-
-log_ok "流量已切换到 ${TARGET_ENV}"
-
-# ─── 更新 haproxy.cfg 并 reload ───────────────────────────────────────────────
-log_step "步骤 2/3: 更新 haproxy.cfg..."
-ACTIVE_ENV="${TARGET_ENV}" bash "${SCRIPT_DIR}/generate-haproxy-config.sh"
-
-log_step "步骤 3/3: 优雅重载 HAProxy..."
-docker kill -s HUP "${CONTAINER_HAPROXY}"
-
-for i in {1..30}; do
-    if docker exec "${CONTAINER_HAPROXY}" test -S "${HAPROXY_SOCKET}" 2>/dev/null; then
-        if docker exec "${CONTAINER_HAPROXY}" sh -c "echo 'show info' | socat stdio ${HAPROXY_SOCKET}" &>/dev/null; then
-            log_ok "HAProxy 重载完成"
-            break
-        fi
-    fi
-
-    if [[ $i -eq 30 ]]; then
-        log_error "HAProxy 重载超时"
-        docker logs "${CONTAINER_HAPROXY}" 2>&1 | tail -20
-        exit 1
-    fi
-    sleep 1
-done
-
-# ─── 停止旧容器 ───────────────────────────────────────────────────────────────
-log_step "停止旧容器 (${ACTIVE_ENV})..."
-
-if [[ "$ACTIVE_ENV" == "blue" ]]; then
-    OLD_CONTAINER="${CONTAINER_BLUE}"
-else
-    OLD_CONTAINER="${CONTAINER_GREEN}"
-fi
-
-if docker ps --format '{{.Names}}' | grep -q "^${OLD_CONTAINER}$"; then
-    docker stop "${OLD_CONTAINER}"
-    log_ok "${ACTIVE_ENV} 容器已停止"
-else
-    log_warn "${ACTIVE_ENV} 容器未运行，跳过"
-fi
-
-# ─── 更新状态记录 ─────────────────────────────────────────────────────────────
-echo "${TARGET_ENV}" > .active_env
-echo "$(date '+%Y-%m-%d %H:%M:%S') - [ROLLBACK] 从 ${ACTIVE_ENV} 回滚到 ${TARGET_ENV}" >> switch-history.log
-
 # ─── 完成 ─────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}========================================${NC}"
 echo -e "${BOLD}${GREEN}   回滚完成！${NC}"
 echo -e "${BOLD}${GREEN}========================================${NC}"
 echo ""
-echo -e "  当前活跃环境: ${BOLD}${TARGET_ENV}${NC}"
+echo -e "  当前版本: ${BOLD}${TARGET_TAG}${NC}"
 echo ""
 echo -e "  查看状态: bash scripts/status.sh"
 echo ""

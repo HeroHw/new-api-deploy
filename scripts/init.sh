@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# 一键初始化脚本 - 从零开始搭建蓝绿发布环境
+# 一键初始化脚本 - 启动单服务环境
 # 用法: ./scripts/init.sh
 #
 
@@ -62,24 +62,22 @@ if [[ ! -f ".env" ]]; then
     echo "  必填项:"
     echo "    ACR_REGISTRY  - 镜像仓库地址（如 registry.example.com）"
     echo "    APP_NAME      - 应用名称"
-    echo "    SQL_DSN       - 数据库连接字符串"
-    echo "    BLUE_TAG      - Blue 镜像标签"
+    echo "    IMAGE_TAG     - 镜像标签（如 v20260304）"
     exit 1
 fi
 
 # 加载环境变量
 while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ "$line" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "${line//[[:space:]]/}" ]] && continue
-        [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] && export "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
-    done < .env
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] && export "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+done < .env
 
 # 校验必填项
 MISSING=()
-[[ -z "$ACR_REGISTRY" || "$ACR_REGISTRY" == "your-registry.azurecr.io" ]] && MISSING+=("ACR_REGISTRY")
-[[ -z "$APP_NAME" ]]   && MISSING+=("APP_NAME")
-[[ -z "$SQL_DSN" ]]    && MISSING+=("SQL_DSN")
-[[ -z "$BLUE_TAG" ]]   && MISSING+=("BLUE_TAG")
+[[ -z "$ACR_REGISTRY" ]] && MISSING+=("ACR_REGISTRY")
+[[ -z "$APP_NAME" ]]     && MISSING+=("APP_NAME")
+[[ -z "$IMAGE_TAG" ]]    && MISSING+=("IMAGE_TAG")
 
 if [[ ${#MISSING[@]} -gt 0 ]]; then
     log_error "以下必填项未配置，请编辑 .env 文件："
@@ -89,16 +87,11 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
     exit 1
 fi
 
-# 设置默认值
-CONTAINER_BLUE=${CONTAINER_BLUE:-app-blue}
-CONTAINER_GREEN=${CONTAINER_GREEN:-app-green}
-CONTAINER_HAPROXY=${CONTAINER_HAPROXY:-haproxy}
+CONTAINER_NAME=${CONTAINER_NAME:-app}
 NETWORK_NAME=${NETWORK_NAME:-deploy-network}
-HAPROXY_HTTP_PORT=${HAPROXY_HTTP_PORT:-80}
-HAPROXY_STATS_PORT=${HAPROXY_STATS_PORT:-8404}
-HAPROXY_SOCKET="/tmp/admin.sock"
+APP_PORT=${APP_PORT:-3000}
 
-log_ok ".env 配置加载完成（ACR: ${ACR_REGISTRY}, APP: ${APP_NAME}）"
+log_ok ".env 配置加载完成（ACR: ${ACR_REGISTRY}, APP: ${APP_NAME}, TAG: ${IMAGE_TAG}）"
 
 # ─── 创建 Docker 网络 ─────────────────────────────────────────────────────────
 
@@ -111,18 +104,11 @@ else
     log_ok "网络 ${NETWORK_NAME} 已创建"
 fi
 
-# ─── 创建数据目录 ─────────────────────────────────────────────────────────────
-
-log_step "创建数据和日志目录..."
-
-mkdir -p data-blue data-green logs-blue logs-green
-log_ok "目录已就绪"
-
 # ─── 拉取应用镜像 ─────────────────────────────────────────────────────────────
 
 log_step "拉取应用镜像..."
 
-IMAGE="${ACR_REGISTRY}/${APP_NAME}:${BLUE_TAG}"
+IMAGE="${ACR_REGISTRY}/${APP_NAME}:${IMAGE_TAG}"
 log_info "拉取: ${IMAGE}"
 
 if ! docker pull "${IMAGE}"; then
@@ -133,74 +119,28 @@ fi
 
 log_ok "镜像拉取完成"
 
-# ─── 启动 Blue 应用容器 ───────────────────────────────────────────────────────
+# ─── 启动应用容器 ─────────────────────────────────────────────────────────────
 
-log_step "启动 Blue 应用容器..."
+log_step "启动应用容器..."
 
-# 仅启动 blue，green 在首次部署时再启动
-# 注意：docker compose 使用服务名（docker-compose.yml 中的 key），不是容器名
-docker compose up -d app-blue
+docker compose up -d app
 
-# 等待 blue 健康
-log_info "等待 Blue 容器健康检查通过..."
+# 等待容器健康
+log_info "等待容器健康检查通过（最多 60s）..."
 for i in {1..60}; do
-    if docker exec "${CONTAINER_BLUE}" curl -sf "http://localhost:3000/api/status" &>/dev/null; then
-        log_ok "Blue 容器已就绪"
+    if docker exec "${CONTAINER_NAME}" curl -sf "http://localhost:3000/api/status" &>/dev/null; then
+        log_ok "容器已就绪"
         break
     fi
 
     if [[ $i -eq 60 ]]; then
-        log_error "Blue 容器启动超时，查看日志："
-        docker logs "${CONTAINER_BLUE}" 2>&1 | tail -30
+        log_error "容器启动超时，查看日志："
+        docker logs "${CONTAINER_NAME}" 2>&1 | tail -30
         exit 1
     fi
 
     if [[ $((i % 10)) -eq 0 ]]; then
-        log_info "等待 Blue 就绪... (${i}/60)"
-    fi
-    sleep 1
-done
-
-# ─── 生成 HAProxy 配置 ────────────────────────────────────────────────────────
-
-log_step "生成 HAProxy 配置（初始激活环境: blue）..."
-
-ACTIVE_ENV=blue bash "${SCRIPT_DIR}/generate-haproxy-config.sh"
-echo "blue" > .active_env
-
-log_ok "haproxy.cfg 已生成"
-
-# ─── 构建 HAProxy 镜像 ────────────────────────────────────────────────────────
-
-log_step "构建 HAProxy 镜像（含 socat）..."
-
-docker compose -f docker-compose-haproxy.yml build --quiet
-log_ok "HAProxy 镜像构建完成"
-
-# ─── 启动 HAProxy ─────────────────────────────────────────────────────────────
-
-log_step "启动 HAProxy..."
-
-docker compose -f docker-compose-haproxy.yml up -d
-
-# 等待 HAProxy Runtime API socket 就绪
-log_info "等待 HAProxy Runtime API 就绪..."
-for i in {1..30}; do
-    if docker exec "${CONTAINER_HAPROXY}" test -S "${HAPROXY_SOCKET}" 2>/dev/null; then
-        if docker exec "${CONTAINER_HAPROXY}" sh -c "echo 'show info' | socat stdio ${HAPROXY_SOCKET}" &>/dev/null; then
-            log_ok "HAProxy Runtime API 已就绪"
-            break
-        fi
-    fi
-
-    if [[ $i -eq 30 ]]; then
-        log_error "HAProxy 启动超时，查看日志："
-        docker logs "${CONTAINER_HAPROXY}" 2>&1 | tail -20
-        exit 1
-    fi
-
-    if [[ $((i % 5)) -eq 0 ]]; then
-        log_info "等待 HAProxy 就绪... (${i}/30)"
+        log_info "等待就绪... (${i}/60)"
     fi
     sleep 1
 done
@@ -209,12 +149,12 @@ done
 
 log_step "端到端链路验证..."
 
-sleep 2
+sleep 1
 
-if curl -sf "http://localhost:${HAPROXY_HTTP_PORT}/api/status" &>/dev/null; then
-    log_ok "链路验证通过：http://localhost:${HAPROXY_HTTP_PORT}/api/status 正常响应"
+if curl -sf "http://localhost:${APP_PORT}/api/status" &>/dev/null; then
+    log_ok "链路验证通过：http://localhost:${APP_PORT}/api/status 正常响应"
 else
-    log_warn "HAProxy 健康检查未通过，可能应用尚未完全启动，请稍后检查"
+    log_warn "健康检查未通过，可能应用尚未完全启动，请稍后检查"
 fi
 
 # ─── 完成 ─────────────────────────────────────────────────────────────────────
@@ -224,14 +164,13 @@ echo -e "${BOLD}${GREEN}========================================${NC}"
 echo -e "${BOLD}${GREEN}   初始化完成！${NC}"
 echo -e "${BOLD}${GREEN}========================================${NC}"
 echo ""
-echo -e "  应用入口:    ${BOLD}http://localhost:${HAPROXY_HTTP_PORT}${NC}"
-echo -e "  HAProxy 统计: ${BOLD}http://localhost:${HAPROXY_STATS_PORT}${NC}"
-echo -e "  当前活跃环境: ${BOLD}blue${NC}"
+echo -e "  应用入口:   ${BOLD}http://localhost:${APP_PORT}${NC}"
+echo -e "  镜像版本:   ${BOLD}${IMAGE_TAG}${NC}"
 echo ""
 echo -e "  常用命令:"
 echo "    查看状态:   bash scripts/status.sh"
-echo "    切换流量:   bash scripts/switch-traffic.sh <blue|green>"
+echo "    回滚版本:   bash scripts/rollback.sh <image_tag>"
+echo "    停止服务:   bash scripts/down.sh"
 echo ""
 
-# 设置脚本执行权限（供后续使用）
 chmod +x scripts/*.sh
