@@ -4,6 +4,14 @@ services:
     container_name: ${CONTAINER_NAME:-app}
     networks:
       - deploy-network
+    ulimits:
+      nofile:
+        soft: ${ULIMIT_NOFILE_SOFT:-1024}
+        hard: ${ULIMIT_NOFILE_HARD:-1024}
+    sysctls:
+      - net.ipv4.ip_local_port_range=${IP_LOCAL_PORT_RANGE_START:-32768} ${IP_LOCAL_PORT_RANGE_END:-60999}
+      - net.ipv4.tcp_tw_reuse=${TCP_TW_REUSE:-2}
+      - net.ipv4.tcp_fin_timeout=${TCP_FIN_TIMEOUT:-60}
     ports:
       - "${APP_PORT:-3000}:3000"
     volumes:
