@@ -9,7 +9,7 @@ services:
         soft: ${ULIMIT_NOFILE_SOFT:-1024}
         hard: ${ULIMIT_NOFILE_HARD:-1024}
     logging:
-      driver: local
+      driver: json-file
       options:
         max-size: "50m"
         max-file: "10"
